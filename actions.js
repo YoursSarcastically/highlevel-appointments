@@ -1,0 +1,95 @@
+/* ---------- new client modal ---------- */
+function newClientModal(){return mh('New client','Creates a HighLevel contact for this location')+'<form data-form="newcli" class="stack"><label class="f">Name<input class="input" name="name" required placeholder="Full name" id="nc-name"></label><label class="f">Mobile <span class="faint" style="font-weight:400">· optional, used to match online bookings</span><input class="input" name="phone" placeholder="(555) 010-2000" inputmode="tel" id="nc-phone"></label><label class="f">Email <span class="faint" style="font-weight:400">· optional, for receipts</span><input class="input" name="email" type="email" placeholder="name@example.com" id="nc-email"></label><div class="row"><button class="btn p" type="submit">Create contact</button><button class="btn" type="button" data-a="close">Cancel</button></div></form>'}
+/* ---------- API layer ---------- */
+const LOC_KEY='hl-appt-loc';
+function curLoc(){try{return localStorage.getItem(LOC_KEY)}catch(e){return null}}
+function setLoc(id){try{localStorage.setItem(LOC_KEY,id)}catch(e){}}
+async function api(method,path,body){const r=await fetch(path,{method,headers:body?{'Content-Type':'application/json'}:{},body:body?JSON.stringify(body):undefined});const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||('HTTP '+r.status));return j}
+const L=(p)=>'/api/locations/'+S.id+p;
+function apply(res){S=res&&res.state?res.state:res;render()}
+async function load(quiet){try{const locs=await api('GET','/api/locations');let id=curLoc();if(!locs.some(l=>l.id===id)){id=locs[0].id;setLoc(id)}S=await api('GET','/api/locations/'+id+'/state');render()}catch(e){if(!quiet){$('#app').innerHTML='<div style="padding:40px;font-family:Inter,sans-serif"><h2>Cannot reach the API</h2><p class="muted">'+esc(e.message)+'. Is <code>python3 server.py</code> running?</p></div>'}}}
+async function run(fn){try{await fn()}catch(e){toast(e.message)}}
+function refocus(sel){const i=$(sel);if(i){i.focus();if(i.setSelectionRange&&i.type!=='number')try{i.setSelectionRange(i.value.length,i.value.length)}catch(x){}}}
+const A={
+ ovclose(el,e){if(e.target===el)closeM()},close(){closeM()},go(el){go(el.dataset.p)},toast(el){toast(el.dataset.m)},
+ copylink(){const url=location.origin+'/book/'+S.slug;const done=()=>toast('Link copied · '+url);if(navigator.clipboard&&navigator.clipboard.writeText)navigator.clipboard.writeText(url).then(done,()=>toast(url));else toast(url)},
+ status(el){run(async()=>{apply(await api('PATCH',L(''),{status:el.dataset.k}));toast(S.status==='open'?'Accepting bookings':S.status==='busy'?'Online booking paused for today':'Closed today')})},
+ type(el){if(el.dataset.k===S.id)return;setLoc(el.dataset.k);UI.bk={};UI.bm=null;UI.onb=0;M=null;run(load)},
+ mvp(){modal(mvpModal)},
+ hlrefresh(){UI.hl=null;UI.hlLoading=false;render()},
+ openurl(el){window.open(el.dataset.url,'_blank','noopener')},
+ hlsvcpush(){run(async()=>{toast('Creating HighLevel calendars…');const r=await api('POST',L('/hl/services/push'));S=r.state;UI.hl=null;render();toast(r.pushed+' services now have a HighLevel calendar')})},
+ hlsvcimport(){run(async()=>{toast('Importing calendars…');const r=await api('POST',L('/hl/services/import'));S=r.state;UI.hl=null;render();toast(r.imported+' of '+r.total+' calendars linked or added as services')})},
+ hlfunnels(){run(async()=>{UI.hlFunnelsLoading=true;render();const r=await api('GET',L('/hl/funnels'));UI.hlFunnels=r.funnels;UI.hlFunnelsLoading=false;render()})},
+ hlfunnel(el){run(async()=>{const f=(UI.hlFunnels||[]).find(x=>x.id===el.dataset.id);apply(await api('POST',L('/hl/funnel'),f?{id:f.id,name:f.name,url:f.url}:{}));toast(f?f.name+' is now the website':'Website unlinked')})},
+ hlsync(el){run(async()=>{const k=el.dataset.k;const body={sync:{}};body.sync[k]=!UI.hl.sync[k];UI.hl=await api('PATCH',L('/hl/settings'),body);await load(true);toast((UI.hl.sync[k]?'On: ':'Off: ')+el.getAttribute('aria-label'))})},
+ hllink(el){run(async()=>{UI.hl=await api('PATCH',L('/hl/settings'),{link:el.dataset.k==='1'});await load(true);toast(el.dataset.k==='1'?V().biz+' now syncs to '+(UI.hl.location?UI.hl.location.name:'HighLevel'):'Unlinked · nothing syncs from this business')})},
+ hltest(){run(async()=>{const r=await api('POST',L('/hl/test'));toast('Connected to '+r.location.name+' · '+r.users+' users · '+r.calendars+' calendars');UI.hl=null;render()})},
+ hlteam(){run(async()=>{toast('Syncing team…');const r=await api('POST',L('/hl/team'),{create:true});S=r.state;UI.hl=null;render();const linked=r.report.filter(x=>x.calendar).length;toast(linked+' of '+r.report.length+' linked to calendars'+(r.report.some(x=>x.created)?' · created '+r.report.filter(x=>x.created).length:''))})},
+ hlpush(){run(async()=>{toast('Pushing clients…');const r=await api('POST',L('/hl/push-clients'));S=r.state;UI.hl=null;render();toast(r.pushed+' clients pushed to HighLevel')})},
+ hlimport(){run(async()=>{toast('Importing contacts…');const r=await api('POST',L('/hl/import-contacts'));S=r.state;UI.hl=null;render();toast(r.imported+' of '+r.total+' contacts linked or created')})},
+ hltx(){run(async()=>{const r=await api('GET',L('/hl/transactions'));UI.hltx=r.transactions;render()})},
+ hlseed(){run(async()=>{toast('Seeding HighLevel… this takes a minute');const r=await api('POST',L('/hl/seed'));S=r.state;UI.hl=null;UI.hlOpts=null;UI.hlSeed=r.done;render();toast('Seeded: '+Object.entries(r.done).map(([k,v])=>v+' '+k).join(' · '))})},
+ hlverify(){run(async()=>{UI.hlVerifying=true;render();try{UI.hlVerify=await api('GET',L('/hl/verify'))}finally{UI.hlVerifying=false}UI.hl=null;render();toast(UI.hlVerify.ok?'Verified: everything linked exists in HighLevel':'Verified: some items are missing')})},
+ seedmore(){run(async()=>{toast('Adding demo data…');const r=await api('POST',L('/demo/seed-more'),{});S=r.state;render();toast(Object.entries(r.done).map(([k,v])=>v+' '+k).join(' · ')+' added')})},
+ hlprod(){run(async()=>{toast('Creating products…');const r=await api('POST',L('/hl/products/push'));S=r.state;UI.hl=null;UI.hlOpts=null;render();toast(r.pushed+' services and passes now exist as HighLevel products')})},
+ hllapsed(){run(async()=>{toast('Sending…');const r=await api('POST',L('/hl/email/lapsed'),{days:60});S=r.state;UI.hl=null;render();toast(r.sent+' re-engagement emails sent')})},
+ hlobjsetup(){run(async()=>{toast('Setting up custom objects…');const r=await api('POST',L('/hl/objects/setup'));S=r.state;UI.hl=null;UI.hlOpts=null;render();toast(Object.keys(r.objects).length+' custom objects ready')})},
+ hlobjbackfill(){run(async()=>{toast('Writing records…');const r=await api('POST',L('/hl/objects/backfill'));S=r.state;UI.hl=null;render();toast(r.pushed+' records written to HighLevel')})},
+ hlrecon(){run(async()=>{UI.reconLoading=true;render();const r=await api('GET',L('/hl/reconcile?date='+TODAY));UI.recon=r;UI.reconLoading=false;render()})},
+ hlsubs(el){run(async()=>{const id=el.dataset.id;UI.subs=UI.subs||{};UI.subs[id]={loading:true};drawM();const r=await api('GET',L('/hl/clients/'+id+'/submissions'));UI.subs[id]=r;drawM()})},
+ feat(el){run(async()=>{const k=el.dataset.k;const body={features:{}};body.features[k]=!S.features[k];apply(await api('PATCH',L(''),body));toast((S.features[k]?'On: ':'Off: ')+el.getAttribute('aria-label'))})},
+ clock(el){run(async()=>{const st=ST(el.dataset.id);const r=await api('POST',L('/staff/'+st.id+'/clock'));apply(r);const s2=ST(st.id);toast(st.name.split(' ')[0]+(r.action==='in'?' clocked in':' clocked out · '+hoursWorked(s2).toFixed(1)+'h today'))})},
+ newcli(){modal(newClientModal);setTimeout(()=>{const i=$('#nc-name');if(i)i.focus()},0)},clif(el){UI.cliF=el.dataset.k;render()},
+ eod(){go('eod')},sitepreview(){modal(siteModal)},
+ pageon(el){run(async()=>{const p=S.pages.find(x=>x.id===el.dataset.id);apply(await api('PATCH',L('/pages/'+p.id),{on:!p.on}))})},
+ bkpreview(){UI.bk={};modal(bkModal)},
+ reset(){run(async()=>{closeM();apply(await api('POST',L('/demo/reset'),{onboarded:true}));UI.bk={};toast('Demo reset')})},
+ onb(el){UI.onb=+el.dataset.k;render()},
+ onbdone(){run(async()=>{apply(await api('PATCH',L(''),{onboarded:true}));UI.onb=0;go('desk');toast('Booking link is live')})},
+ rush(){run(async()=>{const r=await api('POST',L('/demo/rush'));closeM();S=r.state;go('desk');toast(r.booked+' bookings just came in · '+V().rush)})},
+ walkin(){UI.bm={walkin:true};modal(()=>bookModal())},book(){UI.bm={};modal(()=>bookModal())},bookfor(el){UI.bm={client:el.dataset.id};modal(()=>bookModal())},
+ bmclient(el){UI.bm.client=el.dataset.id||null;UI.bm.q='';drawM()},
+ bmnew(){run(async()=>{const r=await api('POST',L('/clients'),{name:UI.bm.q.trim()});S=r.state;UI.bm.client=r.id;UI.bm.q='';drawM();toast('Contact created: '+C(r.id).name)})},
+ bmdate(el){UI.bm.date=el.dataset.id;UI.bm.time=null;drawM()},bmtime(el){UI.bm.time=el.dataset.id;drawM()},
+ bmsave(){run(async()=>{const b=UI.bm;const sv=SV(b.svc)||S.services[0];const st=ST(b.staff);if(b.walkin){const r=await api('POST',L('/appointments'),{walkin:true,service_id:sv.id,staff_id:st?st.id:null,client_id:b.client});const who=r.state.staff.find(s=>s.id===r.staff_id);S=r.state;toast(C(b.client).name+' checked in with '+who.name.split(' ')[0])}else{const r=await api('POST',L('/appointments'),{service_id:sv.id,staff_id:st?st.id:null,client_id:b.client,date:b.date,time:b.time,source:'phone'});S=r.state;toast('Booked · confirmation texted')}UI.bm=null;closeM();render()})},
+ arrive(el){run(async()=>{const a=S.appts.find(x=>x.id===el.dataset.id);closeM();apply(await api('POST',L('/appointments/'+a.id+'/checkin')));toast(C(a.clientId).name+' checked in')})},
+ unarrive(el){run(async()=>{apply(await api('POST',L('/appointments/'+el.dataset.id+'/unarrive')))})},
+ noshow(el){run(async()=>{closeM();apply(await api('POST',L('/appointments/'+el.dataset.id+'/noshow')));toast('Marked no-show · logged on the contact')})},
+ cancel(el){run(async()=>{closeM();apply(await api('POST',L('/appointments/'+el.dataset.id+'/cancel')));toast('Cancelled · client texted')})},
+ appt(el){modal(()=>apptModal(el.dataset.id))},pay(el){UI.tip=0;UI.tipAmt=0;modal(()=>payModal(el.dataset.id))},tip(el){UI.tip=+el.dataset.k;UI.tipAmt=0;drawM()},
+ dopay(el){run(async()=>{const a=S.appts.find(x=>x.id===el.dataset.id);const sv=SV(a.serviceId);const tip=UI.tip?Math.round(sv.price*UI.tip)/100:(UI.tipAmt||0);const method=el.dataset.m;const r=await api('POST',L('/appointments/'+a.id+'/pay'),{method,tip});closeM();apply(r);toast(method==='Pass'?'Pass redeemed'+(tip?' · tip '+money(tip):''):'Paid '+money(r.charged)+' · receipt texted')})},
+ client(el){modal(()=>clientModal(el.dataset.id),{right:true})},
+ sell(el){UI.sm={client:el.dataset.cl||null};modal(()=>sellModal(el.dataset.cl,el.dataset.id,el.dataset.after))},smclient(el){UI.sm.client=el.dataset.id||null;UI.sm.q='';drawM()},smpass(el){UI.sm.pass=el.dataset.id;drawM()},
+ smsave(el){run(async()=>{const b=UI.sm;const p=PS(b.pass)||S.passes[0];const c=C(b.client);S=await api('POST',L('/passes/'+p.id+'/sell'),{client_id:c.id});toast(c.name+' bought '+p.name+' · '+money(p.price));UI.sm=null;if(el.dataset.after){UI.tip=0;modal(()=>payModal(el.dataset.after))}else closeM();render()})},
+ addpass(){modal(passModal)},delpass(el){run(async()=>{apply(await api('DELETE',L('/passes/'+el.dataset.id)))})},
+ roster(el){UI.rq='';modal(()=>rosterModal(el.dataset.id,el.dataset.date))},
+ rosteradd(el){run(async()=>{const c=C(el.dataset.cl);const cl=CL(el.dataset.id);const r=await api('POST',L('/classes/'+cl.id+'/attendance'),{client_id:c.id,date:el.dataset.date});S=r.state;UI.rq='';drawM();render();toast(c.name+' checked in'+(r.pass_used?' · pass':' · '+money(cl.price)))})},
+ rosterrm(el){run(async()=>{S=await api('DELETE',L('/classes/'+el.dataset.id+'/attendance/'+el.dataset.cl+'?date='+el.dataset.date));drawM();render()})},
+ sday(el){UI.sched=el.dataset.d;UI.schedScrolled=false;render()},tonow(){const w=$('#schedwrap');const l=$('.lane');if(w&&l){w.scrollTo({top:Math.max(0,(nowMins()-(+l.dataset.start))/30*48-140),behavior:'smooth'})}},
+ lane(el,e){if(e.target!==el)return;const rect=el.getBoundingClientRect();const m=+el.dataset.start+Math.floor((e.clientY-rect.top)/48)*30;UI.bm={staff:el.dataset.sid,date:el.dataset.date,time:tstr(m)};modal(()=>bookModal())},
+ svcon(el){run(async()=>{const v=SV(el.dataset.id);apply(await api('PATCH',L('/services/'+v.id),{online:!v.online}));toast(SV(v.id).online?'Bookable online everywhere':'Hidden from booking page and Google')})},
+ clson(el){run(async()=>{const c=CL(el.dataset.id);apply(await api('PATCH',L('/classes/'+c.id),{online:!c.online}))})},
+ addsvc(){modal(()=>svcModal())},editsvc(el){modal(()=>svcModal(el.dataset.id))},delsvc(el){run(async()=>{closeM();apply(await api('DELETE',L('/services/'+el.dataset.id)))})},
+ addclass(){modal(()=>classModal())},editclass(el){modal(()=>classModal(el.dataset.id))},delclass(el){run(async()=>{closeM();apply(await api('DELETE',L('/classes/'+el.dataset.id)))})},
+ addstaff(){modal(()=>staffModal())},editstaff(el){modal(()=>staffModal(el.dataset.id))},delstaff(el){run(async()=>{closeM();apply(await api('DELETE',L('/staff/'+el.dataset.id)))})},
+ toghour(el){run(async()=>{const s=ST(el.dataset.id);const k=el.dataset.k;const body={};body[k]=s.hours[k]?null:true;apply(await api('PUT',L('/staff/'+s.id+'/hours'),body))})},
+ bksvc(el){UI.bk.svc=el.dataset.id;UI.bk.time=null;UI.bk.staff=null;drawM()},bkstaff(el){UI.bk.staff=el.dataset.id||null;UI.bk.time=null;drawM()},bkdate(el){UI.bk.date=el.dataset.id;UI.bk.time=null;drawM()},bktime(el){UI.bk.time=el.dataset.id;drawM()},
+ bkconfirm(){run(async()=>{const b=UI.bk;const sv=SV(b.svc)||S.services.filter(v=>v.online)[0];if(!b.name){toast('Add your name to confirm');return}await api('POST','/api/public/'+S.slug+'/book',{service_id:sv.id,staff_id:b.staff||null,date:b.date||TODAY,time:b.time,name:b.name,phone:b.phone||''});UI.bk={};closeM();await load();go('desk');toast('Booked from the public page · it is on the front desk now')})},
+};
+const IN={cliq(el){UI.cliQ=el.value;render();refocus('[data-in=cliq]')},bmq(el){UI.bm.q=el.value;drawM();refocus('[data-in=bmq]')},smq(el){UI.sm.q=el.value;drawM();refocus('[data-in=smq]')},rq(el){UI.rq=el.value;drawM();refocus('[data-in=rq]')},tipamt(el){UI.tipAmt=+el.value||0;UI.tip=0;drawM();refocus('[data-in=tipamt]')},bkname(el){UI.bk.name=el.value},bkphone(el){UI.bk.phone=el.value}};
+const CH={hlfail(el){UI.hlFailOnly=el.checked;render()},hlwf(el){run(async()=>{const b={workflows:{}};b.workflows[el.dataset.k]=el.value;UI.hl=await api('PATCH',L('/hl/settings'),b);toast('Workflow mapping saved')})},
+ hlpl(el){run(async()=>{const b={pipeline:{}};b.pipeline[el.dataset.k]=el.value;if(el.dataset.k==='id'){b.pipeline.booked='';b.pipeline.noshow='';b.pipeline.paid=''}UI.hl=await api('PATCH',L('/hl/settings'),b);render();toast('Pipeline mapping saved')})},
+ hlintake(el){run(async()=>{UI.hl=await api('PATCH',L('/hl/settings'),{intake_form_id:el.value});toast(el.value?'Intake form set':'Intake form cleared')})},
+ bmsvc(el){UI.bm.svc=el.value;UI.bm.time=null;drawM()},bmstaff(el){UI.bm.staff=el.value;UI.bm.time=null;drawM()},
+ slot(el){run(async()=>{apply(await api('PATCH',L(''),{slot:+el.value}))})},cancelHours(el){run(async()=>{apply(await api('PATCH',L(''),{cancelHours:+el.value}))})},deposit(el){run(async()=>{apply(await api('PATCH',L(''),{deposit:+el.value}))})}};
+const F={
+ hlloc(f,d){run(async()=>{UI.hl=await api('PATCH',L('/hl/settings'),{location_id:d.location_id});await load(true);toast(UI.hl.location?'Connected to '+UI.hl.location.name:(UI.hl.error||'Saved'))})},
+ newcli(f,d){run(async()=>{const r=await api('POST',L('/clients'),{name:d.name,phone:(d.phone||'').trim()||undefined,email:(d.email||'').trim()||undefined});S=r.state;closeM();render();modal(()=>clientModal(r.id),{right:true});toast('Contact created: '+d.name)})},
+ onbsvc(f,d){run(async()=>{apply(await api('POST',L('/services'),{name:d.name,cat:d.cat||'Services',dur:+d.dur||30,price:+d.price||0}));toast('Added '+d.name);refocus('#onb-svc-name')})},
+ onbclass(f,d){run(async()=>{apply(await api('POST',L('/classes'),{name:d.name,time:d.time,dur:+d.dur||60,cap:+d.cap||12,price:+d.price||0,staffId:d.staffId,days:[0,1,2,3,4,5]}));toast('Added '+d.name);refocus('#onb-cls-name')})},
+ onbstaff(f,d){run(async()=>{apply(await api('POST',L('/staff'),{name:d.name,role:d.role,rate:+d.rate||0,pin:String(1000+Math.floor(Math.random()*9000))}));toast(d.name+' invited as a HighLevel user');refocus('#onb-staff-name')})},
+ svc(f,d){run(async()=>{const id=f.dataset.id;const staff=S.staff.filter(s=>d['st_'+s.id]).map(s=>s.id);const body={name:d.name,cat:d.cat||'Services',dur:+d.dur,price:+d.price,staff};closeM();apply(id?await api('PATCH',L('/services/'+id),body):await api('POST',L('/services'),body));toast('Saved · pushed to booking page and Google')})},
+ cls(f,d){run(async()=>{const days=[0,1,2,3,4,5,6].filter(i=>d['d'+i]);const id=f.dataset.id;const body={name:d.name,time:d.time,dur:+d.dur,cap:+d.cap,price:+d.price,staffId:d.staffId,days};closeM();apply(id?await api('PATCH',L('/classes/'+id),body):await api('POST',L('/classes'),body))})},
+ pass(f,d){run(async()=>{closeM();apply(await api('POST',L('/passes'),{name:d.name,type:d.type,credits:d.type==='unlimited'?null:+d.credits,price:+d.price,days:+d.days}))})},
+ staff(f,d){run(async()=>{const id=f.dataset.id;const body={name:d.name,role:d.role,rate:+d.rate,pin:d.pin};closeM();apply(id?await api('PATCH',L('/staff/'+id),body):await api('POST',L('/staff'),body));toast(id?'Saved':'Invited as a HighLevel user')})}};

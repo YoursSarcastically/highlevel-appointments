@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Book</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap">
+<style>
+:root{--shadow:0 1px 2px rgba(11,18,32,.04),0 8px 24px -12px rgba(11,18,32,.12);--bg:#eef2f7;--card:#fff;--card2:#f6f8fb;--line:#e3e8ef;--ink:#0f172a;--ink2:#475569;--ink3:#8a94a6;--blue:#2563eb;--blue-soft:#e8efff;--green:#16a34a;--green-soft:#e6f6ec;--amber:#b45309;--amber-soft:#fdf3e1;--red:#dc2626}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.45 Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;-webkit-font-smoothing:antialiased}
+.wrap{max-width:560px;margin:0 auto;padding:0 16px 48px}
+.hero{background:#0f172a;color:#fff;padding:28px 20px 22px;border-radius:0 0 22px 22px;margin:0 -16px 18px}
+.hero h1{margin:0;font-size:24px;font-weight:800;letter-spacing:-.01em}.hero .sub{opacity:.8;font-size:13.5px;margin-top:4px}
+h2{font-size:13px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--ink3);margin:22px 0 10px}
+.opt{box-shadow:0 1px 2px rgba(11,18,32,.03);transition:box-shadow .15s,border-color .15s;display:flex;justify-content:space-between;align-items:center;gap:10px;padding:12px 14px;border:1px solid var(--line);border-radius:12px;background:var(--card);cursor:pointer;margin-bottom:8px;width:100%;text-align:left;font:inherit;color:inherit}
+.opt.on{border-color:var(--blue);box-shadow:0 0 0 1px var(--blue)}.opt small{color:var(--ink3);font-size:12.5px}.opt b{font-weight:700}
+.chips{display:flex;flex-wrap:wrap;gap:8px}
+.chip{padding:9px 13px;border:1px solid var(--line);border-radius:10px;background:var(--card);font:600 13px Inter,sans-serif;color:var(--ink);cursor:pointer}
+.chip.on{background:var(--blue);color:#fff;border-color:var(--blue)}.chip:disabled{opacity:.4;cursor:not-allowed}
+.av{width:22px;height:22px;border-radius:50%;display:inline-grid;place-items:center;font-size:9px;font-weight:700;color:#fff;margin-right:6px;vertical-align:middle}
+.input{width:100%;padding:12px 12px;border:1px solid var(--line);border-radius:12px;background:var(--card);font:inherit;color:var(--ink);margin-bottom:10px}
+.btn{box-shadow:0 6px 14px -8px rgba(59,91,219,.9);width:100%;padding:14px;border:0;border-radius:12px;background:var(--blue);color:#fff;font:700 15px Inter,sans-serif;cursor:pointer;margin-top:6px}.btn:disabled{opacity:.45;cursor:not-allowed}
+.note{color:var(--ink3);font-size:12.5px;margin-top:10px}.tag{display:inline-block;padding:4px 10px;border-radius:999px;font-size:12px;font-weight:600;background:var(--amber-soft);color:var(--amber)}
+.ok{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:22px;text-align:center}.ok .big{font-size:40px}.ok h3{margin:8px 0 4px;font-size:20px}.ok p{color:var(--ink2);margin:0 0 6px}
+.sum{background:var(--card2);border-radius:12px;padding:12px 14px;font-size:13.5px;color:var(--ink2);margin-top:14px}.sum b{color:var(--ink)}
+.err{color:var(--red);font-size:13px;margin-top:8px}
+footer{text-align:center;color:var(--ink3);font-size:12px;margin-top:28px}
+</style></head><body>
+<div class="wrap" id="app"><div class="hero"><h1>Loading…</h1></div></div>
+<script>
+const slug=location.pathname.split('/').filter(Boolean)[1]||'';
+const $=s=>document.querySelector(s);const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const money=n=>'$'+(Math.round(n*100)/100).toFixed(2);const pad=n=>String(n).padStart(2,'0');
+const DAYS=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'],MON=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+const iso=d=>d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate());const addD=(d,n)=>{const x=new Date(d);x.setDate(x.getDate()+n);return x};
+const fmtT=t=>{const [h,m]=t.split(':').map(Number);return ((h+11)%12+1)+(m?':'+pad(m):'')+(h>=12?' PM':' AM')};
+const initials=n=>n.split(' ').map(x=>x[0]).join('').slice(0,2).toUpperCase();
+let P=null;const B={svc:null,staff:null,date:null,time:null,name:'',phone:'',email:''};let SLOTS=[],reason='',loading=false,done=null,err='';
+async function api(method,path,body){const r=await fetch(path,{method,headers:body?{'Content-Type':'application/json'}:{},body:body?JSON.stringify(body):undefined});const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||('HTTP '+r.status));return j}
+async function loadSlots(){if(!B.svc||!B.date){SLOTS=[];return}loading=true;render();try{const q=new URLSearchParams({service_id:B.svc,date:B.date});if(B.staff)q.set('staff_id',B.staff);const r=await api('GET','/api/public/'+slug+'/availability?'+q);SLOTS=r.slots;reason=r.reason||''}catch(e){SLOTS=[];reason=e.message}loading=false;render()}
+function render(){const a=$('#app');if(!P){a.innerHTML='<div class="hero"><h1>'+esc(err||'Loading…')+'</h1></div>';return}
+ const head='<div class="hero"><h1>'+esc(P.name)+'</h1><div class="sub">'+esc(P.city)+' · '+(P.status==='open'?'open today':P.status==='busy'?'fully booked today':'closed today')+'</div></div>';
+ if(done){a.innerHTML=head+'<div class="ok"><div class="big">✅</div><h3>You\'re booked</h3><p><b>'+esc(done.service)+'</b> with '+esc(done.staff.split(' ')[0])+'</p><p>'+rel(done.date)+' at '+fmtT(done.time)+'</p><p class="note">A confirmation text is on its way. Free to cancel until '+esc(String(P.cancelHours||24))+' hours before.</p><button class="btn" onclick="location.reload()">Book another</button></div>'+foot();return}
+ if(P.pages&&P.pages.book===false){a.innerHTML=head+'<div class="ok"><h3>Online booking is off</h3><p>Call or message '+esc(P.name)+' to book.</p></div>'+foot();return}
+ const sv=P.services.find(v=>v.id===B.svc);const cands=sv?P.staff.filter(s=>sv.staff.includes(s.id)):[];
+ let h=head+'<h2>1 · Service</h2>'+P.services.map(v=>'<button class="opt '+(v.id===B.svc?'on':'')+'" data-svc="'+v.id+'"><span>'+esc(v.em)+' '+esc(v.name)+' <small>· '+v.dur+' min</small></span><b>'+(v.price?money(v.price):'Free')+'</b></button>').join('');
+ if(sv){h+='<h2>2 · Who</h2><div class="chips"><button class="chip '+(!B.staff?'on':'')+'" data-staff="">Anyone</button>'+cands.map(s=>'<button class="chip '+(B.staff===s.id?'on':'')+'" data-staff="'+s.id+'"><span class="av" style="background:'+s.color+'">'+initials(s.name)+'</span>'+esc(s.name.split(' ')[0])+'</button>').join('')+'</div>';
+  h+='<h2>3 · Day</h2><div class="chips">'+Array.from({length:7},(_,i)=>{const x=iso(addD(new Date(),i));return '<button class="chip '+(x===B.date?'on':'')+'" data-date="'+x+'">'+(i===0?'Today':DAYS[(new Date(x+'T12:00').getDay()+6)%7]+' '+ +x.slice(8))+'</button>'}).join('')+'</div>';
+  if(B.date){h+='<h2>4 · Time</h2>'+(loading?'<div class="note">Checking availability…</div>':SLOTS.length?'<div class="chips">'+SLOTS.map(t=>'<button class="chip '+(B.time===t?'on':'')+'" data-time="'+t+'">'+fmtT(t)+'</button>').join('')+'</div>':'<span class="tag">'+esc(reason||'No openings that day')+'</span>')}
+  if(B.time){h+='<h2>5 · You</h2><input class="input" id="nm" placeholder="Your name" value="'+esc(B.name)+'"><input class="input" id="ph" placeholder="Mobile number" inputmode="tel" value="'+esc(B.phone)+'"><input class="input" id="em" type="email" placeholder="Email (optional, for your receipt)" value="'+esc(B.email||'')+'">'
+   +'<div class="sum"><b>'+esc(sv.name)+'</b> · '+(B.staff?esc(cands.find(s=>s.id===B.staff).name):'first available')+' · '+rel(B.date)+' at '+fmtT(B.time)+' · '+(sv.price?money(sv.price):'Free')+'</div>'
+   +'<button class="btn" id="go" '+(B.name.trim()?'':'disabled')+'>Confirm '+fmtT(B.time)+'</button>'+(err?'<div class="err">'+esc(err)+'</div>':'')}}
+ a.innerHTML=h+foot();}
+function rel(s){const t=iso(new Date());if(s===t)return 'Today';if(s===iso(addD(new Date(),1)))return 'Tomorrow';const d=new Date(s+'T12:00');return DAYS[(d.getDay()+6)%7]+' '+MON[d.getMonth()]+' '+d.getDate()}
+function foot(){return '<footer>Powered by HighLevel</footer>'}
+document.addEventListener('click',async e=>{const b=e.target.closest('button');if(!b)return;
+ if(b.dataset.svc!==undefined){B.svc=b.dataset.svc;B.staff=null;B.time=null;if(!B.date)B.date=iso(new Date());err='';await loadSlots()}
+ else if(b.dataset.staff!==undefined){B.staff=b.dataset.staff||null;B.time=null;await loadSlots()}
+ else if(b.dataset.date!==undefined){B.date=b.dataset.date;B.time=null;await loadSlots()}
+ else if(b.dataset.time!==undefined){B.time=b.dataset.time;render();setTimeout(()=>{const i=$('#nm');if(i)i.focus()},0)}
+ else if(b.id==='go'){b.disabled=true;err='';try{done=await api('POST','/api/public/'+slug+'/book',{service_id:B.svc,staff_id:B.staff,date:B.date,time:B.time,name:B.name,phone:B.phone,email:B.email||''})}catch(x){err=x.message;await loadSlots()}render()}});
+document.addEventListener('input',e=>{if(e.target.id==='nm'){B.name=e.target.value;const g=$('#go');if(g)g.disabled=!B.name.trim()}if(e.target.id==='ph')B.phone=e.target.value;if(e.target.id==='em')B.email=e.target.value});
+(async()=>{try{P=await api('GET','/api/public/'+slug);document.title='Book · '+P.name}catch(e){err='This booking page does not exist'}render()})();
+</script></body></html>

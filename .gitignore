@@ -1,0 +1,5 @@
+hl.config.json
+hl.config.json.tmp
+appointments.db*
+__pycache__/
+.claude/
