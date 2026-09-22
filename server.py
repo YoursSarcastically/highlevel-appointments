@@ -245,7 +245,8 @@ def hl_record(loc_id, kind, props, contact_id=None):
     return rid
 
 
-def hl_after_book(loc_id, aid):
+def hl_after_book(loc_id, aid, quiet=False):
+    """quiet=True writes the calendar event, workflow and opportunity but sends no confirmation (used for back-dated history)."""
     if not hl_active(loc_id, 'appointments'):
         return
     a = one('SELECT a.*, v.name svc_name, v.dur, COALESCE(v.hl_calendar_id, s.hl_calendar_id) hl_calendar_id, s.hl_user_id, s.name staff_name FROM appointments a JOIN services v ON v.id=a.service_id JOIN staff s ON s.id=a.staff_id WHERE a.id=?', (aid,))
@@ -271,7 +272,7 @@ def hl_after_book(loc_id, aid):
         CON.execute('UPDATE appointments SET hl_event_id=? WHERE id=?', (eid, aid))
     hl_enrol(loc_id, cid, 'booked', k['name'])
     hl_opportunity(loc_id, a['client_id'], 'booked', one('SELECT price FROM services WHERE id=?', (a['service_id'],))['price'])
-    if hl_active(loc_id, 'sms') and hl.clean_phone(k['phone']):
+    if not quiet and hl_active(loc_id, 'sms') and hl.clean_phone(k['phone']):
         L = one('SELECT name FROM locations WHERE id=?', (loc_id,))
         msg = 'You\'re booked at %s: %s on %s at %s with %s. Reply to this text to change it.' % (L['name'], a['svc_name'], a['date'], a['time'], a['staff_name'].split(' ')[0])
         hl_try(loc_id, 'sms.confirmation ' + k['name'], lambda: hl.send_sms(cid, msg))
@@ -291,13 +292,13 @@ def hl_after_status(loc_id, aid, status):
         hl_enrol(loc_id, k['hl_contact_id'], 'showed', k['name'])
 
 
-def hl_after_pay(loc_id, aid, method, tip):
+def hl_after_pay(loc_id, aid, method, tip, quiet=False):
     a = one('SELECT a.*, v.name svc_name, v.price, v.hl_product_id, v.hl_price_id FROM appointments a JOIN services v ON v.id=a.service_id WHERE a.id=?', (aid,))
     if not a:
         return
     amount0 = 0 if method == 'Pass' else a['price']
     hl_opportunity(loc_id, a['client_id'], 'paid', amount0 + (tip or 0))
-    if hl_active(loc_id, 'email'):
+    if not quiet and hl_active(loc_id, 'email'):
         k0 = one('SELECT * FROM clients WHERE id=?', (a['client_id'],))
         if k0 and k0.get('email') and '@' in k0['email']:
             cid0 = hl_contact_for(loc_id, a['client_id'])
@@ -1285,6 +1286,131 @@ def h_hl_seed(ctx):
     return dict(done=done, state=state(loc))
 
 
+def h_hl_seed_history(ctx):
+    """Seed the last N days of real-looking activity (paid visits, no-shows, class check-ins, pass sales, shifts) and push
+    all of it into every HighLevel tool that is switched on: contacts, calendars (events with their final status), workflows
+    (booked / showed / no-show / pass sold), opportunities (won on payment), payments & invoices, products, custom objects.
+    Days that already hold appointments are left alone, so running it again is a no-op for them. No texts or emails are sent."""
+    loc = ctx['loc']
+    import random
+    body = ctx['body'] or {}
+    days = max(1, min(30, int(body.get('days', 7))))
+    rnd = random.Random(int(body.get('seed', 11)))
+    cfg = hl.load_cfg()
+    linked = hl.configured(cfg) and cfg.get('app_location_id') == loc
+    L = one('SELECT * FROM locations WHERE id=?', (loc,))
+    services = rows('SELECT * FROM services WHERE location_id=? ORDER BY sort', (loc,))
+    staff = rows('SELECT * FROM staff WHERE location_id=? ORDER BY sort', (loc,))
+    passes = rows('SELECT * FROM passes WHERE location_id=? ORDER BY rowid', (loc,))
+    classes = rows('SELECT * FROM classes WHERE location_id=?', (loc,))
+    done = dict(days=days, clients=0, appointments=0, paid=0, noshows=0, visits=0, passes=0, shifts=0)
+    people = [k['id'] for k in rows('SELECT id FROM clients WHERE location_id=? ORDER BY rowid', (loc,))]
+    for name, phone, email in DEMO_PEOPLE:
+        k = one('SELECT id FROM clients WHERE location_id=? AND phone=?', (loc, phone))
+        if k:
+            people.append(k['id'])
+        else:
+            kid = 'k' + uid()
+            CON.execute('INSERT INTO clients(id,location_id,name,phone,email,visits,created_at) VALUES(?,?,?,?,?,0,?)', (kid, loc, name, phone, email, now_iso()))
+            done['clients'] += 1
+            people.append(kid)
+    made = []  # (appointment id, final status, method, tip)
+    new_passes = []
+    methods = ['Tap to pay', 'Tap to pay', 'Card on file', 'Cash']
+    for i in range(days, 0, -1):
+        d = (date.today() - timedelta(days=i)).isoformat()
+        if one('SELECT 1 FROM appointments WHERE location_id=? AND date=?', (loc, d)):
+            continue  # already has history for that day
+        for s in staff:
+            if not one('SELECT 1 FROM staff_hours WHERE staff_id=? AND dow=?', (s['id'], dow(d))):
+                continue
+            for _ in range(rnd.choice([2, 3, 3, 4])):
+                v = rnd.choice(services)
+                sl = slots(v['id'], s['id'], d, L['slot_min'])
+                if not sl:
+                    break
+                t = rnd.choice(sl)
+                if staff_busy(s['id'], d, t, int(v['dur']) + int(v.get('gap_min') or 0)):
+                    continue
+                kid = rnd.choice(people)
+                src = rnd.choice(['online', 'online', 'online', 'phone', 'google'])
+                r = book(loc, dict(service_id=v['id'], staff_id=s['id'], client_id=kid, date=d, time=t, source=src, no_sync=True), enforce=False)
+                if rnd.random() < 0.12:
+                    CON.execute("UPDATE appointments SET status='noshow' WHERE id=?", (r['id'],))
+                    made.append((r['id'], 'noshow', None, 0))
+                    done['noshows'] += 1
+                else:
+                    tip = rnd.choice([0, 0, 5, 8, 10, 12])
+                    method = rnd.choice(methods)
+                    CON.execute("UPDATE appointments SET status='done', paid=1, tip=?, total=? WHERE id=?", (tip, v['price'], r['id']))
+                    CON.execute('UPDATE clients SET visits=visits+1 WHERE id=?', (kid,))
+                    add_sale(loc, kid, s['id'], v['name'], v['price'], tip, method, d)
+                    made.append((r['id'], 'done', method, tip))
+                    done['paid'] += 1
+                done['appointments'] += 1
+            if not one('SELECT 1 FROM shifts WHERE staff_id=? AND date=?', (s['id'], d)):
+                h = one('SELECT open_time, close_time FROM staff_hours WHERE staff_id=? AND dow=?', (s['id'], dow(d)))
+                if h:
+                    CON.execute('INSERT INTO shifts(id,staff_id,date,clock_in,clock_out) VALUES(?,?,?,?,?)', (uid(), s['id'], d, h['open_time'], h['close_time']))
+                    done['shifts'] += 1
+        w = str(dow(d))
+        for c in classes:
+            if w not in c['days'].split(','):
+                continue
+            have = set()
+            for kid in rnd.sample(people, min(rnd.choice([2, 3, 4]), len(people))):
+                if len(have) >= c['cap']:
+                    break
+                CON.execute('INSERT OR IGNORE INTO attendance(class_id,date,client_id,created_at) VALUES(?,?,?,?)', (c['id'], d, kid, now_iso()))
+                CON.execute('UPDATE clients SET visits=visits+1 WHERE id=?', (kid,))
+                add_sale(loc, kid, c['staff_id'], c['name'], c['price'], 0, 'Tap to pay', d)
+                have.add(kid)
+                done['visits'] += 1
+        if passes and rnd.random() < 0.5:
+            p = rnd.choice(passes)
+            kid = rnd.choice(people)
+            remaining = p['credits'] if p['type'] in ('pack', 'intro') and p['credits'] else None
+            cpid = uid()
+            CON.execute('INSERT INTO client_passes(id,client_id,pass_id,remaining,expires,created_at,status,next_billing,auto_renew,price) VALUES(?,?,?,?,?,?,?,?,?,?)',
+                        (cpid, kid, p['id'], remaining, (date.today() - timedelta(days=i) + timedelta(days=p['days'])).isoformat(), now_iso(), 'active',
+                         (date.today() - timedelta(days=i) + timedelta(days=p['days'])).isoformat() if p['type'] == 'unlimited' else None, 1 if p['type'] == 'unlimited' else 0, p['price']))
+            add_sale(loc, kid, staff[0]['id'] if staff else None, p['name'], p['price'], 0, 'Tap to pay', d)
+            new_passes.append(kid)
+            done['passes'] += 1
+    # push into HighLevel, every switched-on tool
+    pushed = {}
+    if linked:
+        mark = (one('SELECT COALESCE(MAX(id),0) m FROM hl_log') or {}).get('m', 0)
+        for k in rows('SELECT id FROM clients WHERE location_id=? AND hl_contact_id IS NULL ORDER BY rowid', (loc,)):
+            hl_contact_for(loc, k['id'])
+        for aid, status, method, tip in made:
+            hl_after_book(loc, aid, quiet=True)          # calendar event, "booked" workflow, opportunity
+            hl_after_status(loc, aid, status)            # showed / no-show on the event, workflows, opportunity stage
+            if status == 'done':
+                hl_after_pay(loc, aid, method, tip, quiet=True)  # opportunity won, invoice + recorded payment
+        for kid in new_passes:
+            k = one('SELECT name, hl_contact_id FROM clients WHERE id=?', (kid,))
+            hl_enrol(loc, k['hl_contact_id'], 'pass_sold', k['name'])
+        ctx2 = dict(ctx)
+        try:
+            pushed['products'] = h_hl_products_push(ctx2)['pushed']
+        except ApiError:
+            pass
+        if hl_active(loc, 'objects') and (cfg.get('objects') or {}):
+            pushed['records'] = h_hl_objects_backfill(ctx2)['pushed']
+        counts = {}
+        for l in rows('SELECT action FROM hl_log WHERE id>? AND location_id=? AND ok=1', (mark, loc)):
+            key = l['action'].split(' ')[0]
+            group = {'contact.upsert': 'contacts', 'appointment.create': 'appointments', 'appointment.done': 'statuses', 'appointment.noshow': 'statuses',
+                     'workflow.booked': 'workflows', 'workflow.showed': 'workflows', 'workflow.noshow': 'workflows', 'workflow.pass_sold': 'workflows',
+                     'opportunity.create': 'opportunities', 'opportunity.paid': 'opportunities', 'opportunity.noshow': 'opportunities', 'invoice.create': 'invoices'}.get(key)
+            if group:
+                counts[group] = counts.get(group, 0) + 1
+        pushed.update(counts)
+        hl_log(loc, 'seed.history', True, '%d days · ' % days + ' · '.join('%s %d' % kv for kv in pushed.items()))
+    return dict(done=done, pushed=pushed, linked=linked, state=state(loc))
+
+
 DEMO_PEOPLE = [('Aarav Mehta', '+15550110201', 'aarav.mehta@example.com'), ('Sofia Rossi', '+15550110202', 'sofia.rossi@example.com'), ('Liam Walker', '+15550110203', 'liam.walker@example.com'),
                ('Noor Rahman', '+15550110204', 'noor.rahman@example.com'), ('Diego Alvarez', '+15550110205', 'diego.alvarez@example.com'), ('Hana Sato', '+15550110206', 'hana.sato@example.com'),
                ('Elena Petrova', '+15550110207', 'elena.petrova@example.com'), ('Marcus Lee', '+15550110208', 'marcus.lee@example.com'), ('Zara Khan', '+15550110209', 'zara.khan@example.com'),
@@ -1979,6 +2105,7 @@ ROUTES = [
     ('POST',   r'/api/locations/(?P<loc>\w+)/hl/objects/setup$', h_hl_objects_setup),
     ('POST',   r'/api/locations/(?P<loc>\w+)/hl/objects/backfill$', h_hl_objects_backfill),
     ('POST',   r'/api/locations/(?P<loc>\w+)/hl/seed$', h_hl_seed),
+    ('POST',   r'/api/locations/(?P<loc>\w+)/hl/seed-history$', h_hl_seed_history),
     ('GET',    r'/api/locations/(?P<loc>\w+)/hl/verify$', h_hl_verify),
     ('POST',   r'/api/locations/(?P<loc>\w+)/demo/seed-more$', h_seed_more),
     ('POST',   r'/api/locations/(?P<loc>\w+)/auth/pin$', h_auth_pin),

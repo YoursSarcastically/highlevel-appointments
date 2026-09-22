@@ -654,6 +654,39 @@ class T12_ProtocolAndPersistence(Base):
         self.assertEqual([l['type'] for l in ok('GET', '/api/locations')], ['salon', 'gym', 'studio'], 'no duplicate seed on restart')
 
 
+
+class T11e_SeedHistory(Base):
+    def test_seed_history_backfills_the_last_week(self):
+        st = self.state(self.studio)
+        n_appts, n_sales = len(st['appts']), len(st['sales'])
+        r = ok('POST', self.L(self.studio, '/hl/seed-history'), {'days': 7, 'seed': 5})
+        d = r['done']
+        self.assertEqual(d['days'], 7)
+        self.assertGreater(d['appointments'], 10)
+        self.assertEqual(d['appointments'], d['paid'] + d['noshows'])
+        self.assertGreaterEqual(d['shifts'], 1)
+        self.assertFalse(r['linked'])
+        self.assertEqual(r['pushed'], {}, 'nothing leaves the desk while HighLevel is not linked')
+        st2 = r['state']
+        lo, hi = (date.today() - timedelta(days=7)).isoformat(), (date.today() - timedelta(days=1)).isoformat()
+        past = [a for a in st2['appts'] if a['date'] < st2['today']]
+        self.assertEqual(len(past), d['appointments'])
+        self.assertTrue(all(lo <= a['date'] <= hi for a in past))
+        self.assertTrue(all(a['status'] in ('done', 'noshow') for a in past))
+        self.assertTrue(all(a['paid'] for a in past if a['status'] == 'done'))
+        self.assertGreater(len(st2['sales']) - n_sales, d['paid'] - 1, 'every paid visit has a sale dated that day')
+        self.assertTrue(all(lo <= s['date'] <= hi for s in st2['sales'][n_sales:]))
+        seen = set()
+        for a in st2['appts']:
+            if a['status'] in ('booked', 'arrived', 'done'):
+                key = (a['staffId'], a['date'], a['time'])
+                self.assertNotIn(key, seen)
+                seen.add(key)
+        self.assertEqual(len(st2['appts']) - n_appts, d['appointments'])
+        r2 = ok('POST', self.L(self.studio, '/hl/seed-history'), {'days': 7, 'seed': 5})
+        self.assertEqual(r2['done']['appointments'], 0, 'days that already hold history are left alone')
+        self.assertEqual(r2['done']['clients'], 0)
+
 if __name__ == '__main__':
     start_server()
     try:
