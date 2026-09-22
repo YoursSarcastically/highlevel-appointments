@@ -1,4 +1,5 @@
 """SQLite schema, connection handling and per-business-type seed data."""
+import json
 import os
 import sqlite3
 import uuid
@@ -80,12 +81,29 @@ CREATE TABLE IF NOT EXISTS attendance(
 CREATE TABLE IF NOT EXISTS hl_log(
   id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, location_id TEXT, action TEXT NOT NULL,
   ok INTEGER NOT NULL, detail TEXT NOT NULL DEFAULT '');
+CREATE TABLE IF NOT EXISTS waitlist(
+  id TEXT PRIMARY KEY, location_id TEXT NOT NULL REFERENCES locations(id) ON DELETE CASCADE,
+  client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+  class_id TEXT REFERENCES classes(id) ON DELETE CASCADE, service_id TEXT REFERENCES services(id) ON DELETE CASCADE,
+  staff_id TEXT REFERENCES staff(id) ON DELETE SET NULL, date TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'waiting', offered_at TEXT, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS blocks(
+  id TEXT PRIMARY KEY, location_id TEXT NOT NULL REFERENCES locations(id) ON DELETE CASCADE,
+  staff_id TEXT REFERENCES staff(id) ON DELETE CASCADE, date TEXT NOT NULL, start TEXT NOT NULL, end TEXT NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'block', reason TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS giftcards(
+  id TEXT PRIMARY KEY, location_id TEXT NOT NULL REFERENCES locations(id) ON DELETE CASCADE,
+  code TEXT UNIQUE NOT NULL, balance REAL NOT NULL, initial REAL NOT NULL, client_id TEXT REFERENCES clients(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS audit(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, location_id TEXT, actor TEXT, action TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '');
 CREATE TABLE IF NOT EXISTS pages(
   location_id TEXT NOT NULL REFERENCES locations(id) ON DELETE CASCADE,
   id TEXT NOT NULL, name TEXT NOT NULL, on_ INTEGER NOT NULL DEFAULT 1,
   note TEXT NOT NULL DEFAULT '', sort INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(location_id, id));
 """
 
+COLUMN_TYPES = dict(gap_min='INTEGER', deposit='REAL', fee='REAL', spot='INTEGER', spots='INTEGER', auto_renew='INTEGER', price='REAL', expiry_notified='TEXT')
 COLORS = ['#2563eb', '#7c3aed', '#db2777', '#059669', '#d97706', '#0891b2']
 CLIENTS_A = ['Priya S.', 'Marco L.', 'Jordan P.', 'Maya R.', 'Sam K.', 'Lena H.', 'Chris D.', 'Ines M.']
 CLIENTS_B = ['Jordan Lee', 'Sam Ortiz', 'Avery Patel', 'Riley Nguyen', 'Casey Brooks', 'Morgan Diaz', 'Taylor Okafor', 'Jamie Fischer']
@@ -176,9 +194,18 @@ def init(con):
                        ('staff', 'hl_user_id'), ('staff', 'hl_calendar_id'), ('services', 'hl_calendar_id'), ('locations', 'hl_funnel_id'), ('locations', 'hl_funnel_name'), ('locations', 'hl_funnel_url'),
                        ('services', 'hl_product_id'), ('services', 'hl_price_id'), ('passes', 'hl_product_id'), ('passes', 'hl_price_id'),
                        ('clients', 'email'), ('clients', 'hl_opportunity_id'), ('client_passes', 'hl_record_id'), ('client_passes', 'expiry_notified'),
-                       ('attendance', 'hl_record_id'), ('shifts', 'hl_record_id')):
+                       ('attendance', 'hl_record_id'), ('shifts', 'hl_record_id'),
+                       # depth: services, clients, appointments, passes, classes, staff
+                       ('services', 'gap_min'), ('services', 'deposit'), ('services', 'addons'), ('services', 'descr'),
+                       ('clients', 'notes'), ('clients', 'tags'), ('clients', 'birthday'), ('clients', 'preferred_staff'), ('clients', 'card_brand'), ('clients', 'card_last4'), ('clients', 'source'),
+                       ('appointments', 'deposit'), ('appointments', 'fee'), ('appointments', 'manage_token'), ('appointments', 'series_id'), ('appointments', 'addons'), ('appointments', 'notes'), ('appointments', 'spot'),
+                       ('client_passes', 'status'), ('client_passes', 'next_billing'), ('client_passes', 'auto_renew'), ('client_passes', 'frozen_until'), ('client_passes', 'price'),
+                       ('classes', 'spots'), ('classes', 'descr'), ('attendance', 'spot'),
+                       ('staff', 'role_level'), ('staff', 'email'), ('staff', 'phone'), ('staff', 'bio'),
+                       ('sales', 'refund_of'), ('sales', 'appointment_id'), ('sales', 'note'),
+                       ('locations', 'policy'), ('locations', 'brand')):
         if col not in {r[1] for r in con.execute('PRAGMA table_info(%s)' % table)}:
-            con.execute('ALTER TABLE %s ADD COLUMN %s TEXT' % (table, col))
+            con.execute('ALTER TABLE %s ADD COLUMN %s %s' % (table, col, COLUMN_TYPES.get(col, 'TEXT')))
     have = {r['type'] for r in con.execute('SELECT type FROM locations')}
     for t in TYPES:
         if t not in have:
@@ -194,15 +221,16 @@ def seed_location(con, t, loc_id=None, onboarded=0):
     """Create (or recreate) a location of business type `t` with demo data anchored to now."""
     T = TYPES[t]
     loc_id = loc_id or uid()
-    con.execute('INSERT INTO locations(id,slug,type,name,city,status,onboarded,created_at) VALUES(?,?,?,?,?,?,?,?)',
-                (loc_id, slug_of(T['biz']), t, T['biz'], T['city'], 'open', onboarded, now_iso()))
+    con.execute('INSERT INTO locations(id,slug,type,name,city,status,onboarded,created_at,policy) VALUES(?,?,?,?,?,?,?,?,?)',
+                (loc_id, slug_of(T['biz']), t, T['biz'], T['city'], 'open', onboarded, now_iso(),
+                 json.dumps(dict(noshow_fee=50, late_cancel_fee=25, deposit_default=0, reminder_hours=24, require_card_online=False, waitlist=True, self_service=True))))
     open_t, close_t = '09:00', '19:00'
     staff = []
     for i, (n, r) in enumerate(T['team']):
         sid = 's' + uid()
         clock = tstr(max(mins(open_t) - 10 + i * 17, 0)) if i < 2 else None
-        con.execute('INSERT INTO staff(id,location_id,name,role,color,pin,rate,clock_in,clock_in_date,sort) VALUES(?,?,?,?,?,?,?,?,?,?)',
-                    (sid, loc_id, n, r, COLORS[i], str(1111 * (i + 1)), 0 if i == 0 else 35, clock, today() if clock else None, i))
+        con.execute('INSERT INTO staff(id,location_id,name,role,color,pin,rate,clock_in,clock_in_date,sort,role_level) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+                    (sid, loc_id, n, r, COLORS[i], str(1111 * (i + 1)), 0 if i == 0 else 35, clock, today() if clock else None, i, 'owner' if i == 0 else 'staff'))
         for k in range(7):
             if k == 6 or (i == 1 and k == 0):
                 continue
@@ -213,8 +241,11 @@ def seed_location(con, t, loc_id=None, onboarded=0):
     for cat, items in T['services']:
         for n, dur, price, em in items:
             vid = 'v' + uid()
-            con.execute('INSERT INTO services(id,location_id,cat,name,dur,price,emoji,online,sort) VALUES(?,?,?,?,?,?,?,1,?)',
-                        (vid, loc_id, cat, n, dur, price, em, order))
+            gap = 30 if cat == 'Color' else 0
+            dep = 25 if price >= 90 else 0
+            addons = json.dumps([dict(name='Deep conditioning', price=15, min=10), dict(name='Scalp massage', price=10, min=10)]) if t == 'salon' and cat in ('Cuts', 'Finish') else (json.dumps([dict(name='Body composition scan', price=20, min=10)]) if t == 'gym' else json.dumps([]))
+            con.execute('INSERT INTO services(id,location_id,cat,name,dur,price,emoji,online,sort,gap_min,deposit,addons) VALUES(?,?,?,?,?,?,?,1,?,?,?,?)',
+                        (vid, loc_id, cat, n, dur, price, em, order, gap, dep, addons))
             order += 1
             for sid in staff:
                 con.execute('INSERT INTO service_staff VALUES(?,?)', (vid, sid))
@@ -247,8 +278,8 @@ def seed_location(con, t, loc_id=None, onboarded=0):
             remaining = None
         else:
             remaining = rem if rem is not None else o['credits']
-        con.execute('INSERT INTO client_passes(id,client_id,pass_id,remaining,expires,created_at) VALUES(?,?,?,?,?,?)',
-                    (uid(), clients[ci], pid, remaining, exp, now_iso()))
+        con.execute('INSERT INTO client_passes(id,client_id,pass_id,remaining,expires,created_at,status,next_billing,auto_renew,price) VALUES(?,?,?,?,?,?,?,?,?,?)',
+                    (uid(), clients[ci], pid, remaining, exp, now_iso(), 'active', exp if o['type'] == 'unlimited' else None, 1 if o['type'] == 'unlimited' else 0, o['price']))
     grant(0, 0, 3); grant(3, 1, None); grant(1, 2, 1)
     if classes:
         grant(4, 1, None); grant(6, 0, 7)

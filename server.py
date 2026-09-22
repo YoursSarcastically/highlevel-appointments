@@ -9,6 +9,7 @@ import os
 import re
 import sys
 import threading
+import uuid
 from datetime import date, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
@@ -18,6 +19,10 @@ import hl
 from db import uid, now_iso, today, mins, tstr, now_mins
 
 STATIC = os.path.join(os.path.dirname(__file__), 'static')
+# A built React app (npm run build → ../dist) is served in preference to the plain static pages.
+DIST = os.environ.get('APPT_DIST', os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'dist'))
+if not os.path.isdir(DIST):
+    DIST = None
 LOCK = threading.Lock()
 CON = db.connect()
 db.init(CON)
@@ -86,37 +91,47 @@ def state(loc_id):
     for s in rows('SELECT * FROM staff WHERE location_id=? ORDER BY sort, rowid', (loc_id,)):
         clock = s['clock_in'] if s['clock_in_date'] == td else None
         staff.append(dict(id=s['id'], name=s['name'], role=s['role'], color=s['color'], pin=s['pin'], rate=s['rate'],
-                          clockIn=clock, hours=staff_hours(s['id']), hlUserId=s.get('hl_user_id'), hlCalendarId=s.get('hl_calendar_id'),
+                          clockIn=clock, hours=staff_hours(s['id']), hlUserId=s.get('hl_user_id'), hlCalendarId=s.get('hl_calendar_id'), level=s.get('role_level') or 'staff', email=s.get('email') or '', phone=s.get('phone') or '',
                           shifts=[[x['clock_in'], x['clock_out']] for x in rows('SELECT clock_in,clock_out FROM shifts WHERE staff_id=? AND date=?', (s['id'], td))]))
     services = []
     for v in rows('SELECT * FROM services WHERE location_id=? ORDER BY sort, rowid', (loc_id,)):
-        services.append(dict(id=v['id'], cat=v['cat'], name=v['name'], dur=v['dur'], price=v['price'], em=v['emoji'], online=bool(v['online']), hlCalendarId=v.get('hl_calendar_id'), hlProductId=v.get('hl_product_id'),
+        services.append(dict(id=v['id'], cat=v['cat'], name=v['name'], dur=v['dur'], price=v['price'], em=v['emoji'], online=bool(v['online']), hlCalendarId=v.get('hl_calendar_id'), hlProductId=v.get('hl_product_id'), gap=int(v.get('gap_min') or 0), deposit=float(v.get('deposit') or 0), addons=json.loads(v.get('addons') or '[]'), descr=v.get('descr') or '',
                              staff=[r['staff_id'] for r in rows('SELECT staff_id FROM service_staff WHERE service_id=?', (v['id'],))]))
     classes = [dict(id=c['id'], name=c['name'], time=c['time'], dur=c['dur'], cap=c['cap'], price=c['price'], staffId=c['staff_id'],
-                    days=[int(x) for x in c['days'].split(',') if x != ''], online=bool(c['online']))
+                    days=[int(x) for x in c['days'].split(',') if x != ''], online=bool(c['online']), spots=bool(c.get('spots')), descr=c.get('descr') or '')
                for c in rows('SELECT * FROM classes WHERE location_id=? ORDER BY time', (loc_id,))]
     passes = [dict(id=p['id'], name=p['name'], type=p['type'], credits=p['credits'], price=p['price'], days=p['days'], svc=p['svc_name'], desc=p['descr'], hlProductId=p.get('hl_product_id'))
               for p in rows('SELECT * FROM passes WHERE location_id=? ORDER BY rowid', (loc_id,))]
     clients = []
     for c in rows('SELECT * FROM clients WHERE location_id=? ORDER BY rowid', (loc_id,)):
         clients.append(dict(id=c['id'], name=c['name'], phone=c['phone'], email=c.get('email') or '', visits=c['visits'], hlContactId=c.get('hl_contact_id'), hlOpportunityId=c.get('hl_opportunity_id'),
-                            passes=[dict(id=x['id'], passId=x['pass_id'], remaining=x['remaining'], expires=x['expires'])
+                            notes=c.get('notes') or '', tags=[t for t in (c.get('tags') or '').split(',') if t], birthday=c.get('birthday') or '', preferredStaff=c.get('preferred_staff') or '', card=(dict(brand=c['card_brand'] or 'Card', last4=c['card_last4']) if c.get('card_last4') else None), created=c.get('created_at', '')[:10],
+                            passes=[dict(id=x['id'], passId=x['pass_id'], remaining=x['remaining'], expires=x['expires'], status=x.get('status') or 'active', nextBilling=x.get('next_billing'), autoRenew=bool(x.get('auto_renew')), frozenUntil=x.get('frozen_until'), price=float(x['price']) if x.get('price') not in (None, '') else None)
                                     for x in rows('SELECT * FROM client_passes WHERE client_id=? ORDER BY rowid', (c['id'],))]))
     since = (date.today() - timedelta(days=30)).isoformat()
     appts = [dict(id=a['id'], date=a['date'], time=a['time'], serviceId=a['service_id'], staffId=a['staff_id'], clientId=a['client_id'],
-                  status=a['status'], source=a['source'], total=a['total'], tip=a['tip'], paid=bool(a['paid']), hlEventId=a.get('hl_event_id'))
+                  status=a['status'], source=a['source'], total=a['total'], tip=a['tip'], paid=bool(a['paid']), hlEventId=a.get('hl_event_id'),
+                  deposit=float(a.get('deposit') or 0), fee=float(a.get('fee') or 0), token=a.get('manage_token'), seriesId=a.get('series_id'), addons=json.loads(a.get('addons') or '[]'), notes=a.get('notes') or '', spot=int(a['spot']) if a.get('spot') not in (None, '') else None)
              for a in rows('SELECT * FROM appointments WHERE location_id=? AND date>=? ORDER BY date,time', (loc_id, since))]
-    sales = [dict(id=s['id'], date=s['date'], clientId=s['client_id'], staffId=s['staff_id'], label=s['label'], total=s['total'], tip=s['tip'], method=s['method'])
+    sales = [dict(id=s['id'], date=s['date'], clientId=s['client_id'], staffId=s['staff_id'], label=s['label'], total=s['total'], tip=s['tip'], method=s['method'], refundOf=s.get('refund_of'), appointmentId=s.get('appointment_id'), note=s.get('note') or '', at=(s.get('created_at') or '')[11:16])
              for s in rows('SELECT * FROM sales WHERE location_id=? AND date>=? ORDER BY rowid', (loc_id, since))]
     attend = {}
-    for r in rows('SELECT a.class_id,a.date,a.client_id FROM attendance a JOIN classes c ON c.id=a.class_id WHERE c.location_id=? ORDER BY a.rowid', (loc_id,)):
+    for r in rows('SELECT a.class_id,a.date,a.client_id FROM attendance a JOIN classes c ON c.id=a.class_id WHERE c.location_id=? AND a.date>=? ORDER BY a.rowid', (loc_id, since)):
         attend.setdefault(r['class_id'] + '_' + r['date'], []).append(r['client_id'])
+    spots = {}
+    for r in rows('SELECT a.class_id,a.date,a.client_id,a.spot FROM attendance a JOIN classes c ON c.id=a.class_id WHERE c.location_id=? AND a.spot IS NOT NULL', (loc_id,)):
+        spots.setdefault(r['class_id'] + '_' + r['date'], {})[r['client_id']] = r['spot']
     pages = [dict(id=p['id'], name=p['name'], on=bool(p['on_']), note=p['note']) for p in rows('SELECT * FROM pages WHERE location_id=? ORDER BY sort', (loc_id,))]
+    waitlist = [dict(id=w['id'], clientId=w['client_id'], classId=w['class_id'], serviceId=w['service_id'], staffId=w['staff_id'], date=w['date'], status=w['status'], created=w['created_at'][:16]) for w in rows("SELECT * FROM waitlist WHERE location_id=? AND date>=? AND status IN ('waiting','offered') ORDER BY created_at", (loc_id, since))]
+    blocks = [dict(id=b['id'], staffId=b['staff_id'], date=b['date'], start=b['start'], end=b['end'], kind=b['kind'], reason=b['reason']) for b in rows('SELECT * FROM blocks WHERE location_id=? AND date>=? ORDER BY date, start', (loc_id, since))]
+    giftcards = [dict(id=g['id'], code=g['code'], balance=g['balance'], initial=g['initial'], clientId=g['client_id'], created=g['created_at'][:10]) for g in rows('SELECT * FROM giftcards WHERE location_id=? ORDER BY created_at DESC LIMIT 50', (loc_id,))]
+    audit_rows = [dict(ts=r['ts'], actor=r['actor'], action=r['action'], detail=r['detail']) for r in rows('SELECT * FROM audit WHERE location_id=? ORDER BY id DESC LIMIT 30', (loc_id,))]
     return dict(id=L['id'], slug=L['slug'], type=L['type'], vocab=vocab(L['type']), status=L['status'], onboarded=bool(L['onboarded']),
                 rules=dict(cancelHours=L['cancel_hours'], slot=L['slot_min'], open=L['open_time'], close=L['close_time'], deposit=L['deposit']),
                 features=features_of(L), hl=hl_summary(L['id']),
                 hlFunnel=dict(id=L.get('hl_funnel_id'), name=L.get('hl_funnel_name'), url=L.get('hl_funnel_url')) if L.get('hl_funnel_id') else None,
                 staff=staff, services=services, classes=classes, passes=passes, clients=clients, appts=appts, sales=sales, attend=attend, pages=pages,
+                spots=spots, waitlist=waitlist, blocks=blocks, giftcards=giftcards, audit=audit_rows, policy=policy_of(L), name=L['name'], city=L['city'], brand=json.loads(L.get('brand') or '{}'),
                 today=td, now=tstr(now_mins()), locations=location_list())
 
 
@@ -319,12 +334,16 @@ def client_of(kid):
 
 def staff_busy(sid, d, t, dur, exclude=None):
     start, end = mins(t), mins(t) + dur
-    for a in rows("SELECT a.time, v.dur FROM appointments a JOIN services v ON v.id=a.service_id WHERE a.staff_id=? AND a.date=? AND a.status NOT IN ('cancelled','noshow') AND a.id IS NOT ?", (sid, d, exclude)):
-        if start < mins(a['time']) + a['dur'] and mins(a['time']) < end:
+    for a in rows("SELECT a.time, v.dur, COALESCE(v.gap_min,0) gap, a.addons FROM appointments a JOIN services v ON v.id=a.service_id WHERE a.staff_id=? AND a.date=? AND a.status NOT IN ('cancelled','noshow') AND a.id IS NOT ?", (sid, d, exclude)):
+        extra = sum(int(x.get('min') or 0) for x in json.loads(a['addons'] or '[]'))
+        if start < mins(a['time']) + int(a['dur']) + extra + int(a['gap'] or 0) and mins(a['time']) < end:
             return True
     w = str(dow(d))
     for c in rows('SELECT time,dur,days FROM classes WHERE staff_id=?', (sid,)):
         if w in c['days'].split(',') and start < mins(c['time']) + c['dur'] and mins(c['time']) < end:
+            return True
+    for b in blocks_for(sid, d):
+        if start < mins(b['end']) and mins(b['start']) < end:
             return True
     return False
 
@@ -336,9 +355,10 @@ def slots(vid, sid, d, slot_min):
         return []
     out = []
     m = mins(h['open_time'])
+    need_min = v['dur'] + int(v.get('gap_min') or 0)
     while m + v['dur'] <= mins(h['close_time']):
         t = tstr(m)
-        if not (d == today() and m < now_mins() + 30) and not staff_busy(sid, d, t, v['dur']):
+        if not (d == today() and m < now_mins() + 30) and not staff_busy(sid, d, t, need_min):
             out.append(t)
         m += slot_min
     return out
@@ -391,8 +411,12 @@ def book(loc_id, b, enforce=True):
         if not one('SELECT 1 FROM staff_hours WHERE staff_id=? AND dow=?', (sid, dow(d))):
             raise ApiError('Not working that day', 409)
     aid = 'a' + uid()
-    CON.execute('INSERT INTO appointments(id,location_id,date,time,service_id,staff_id,client_id,status,source,total,tip,paid,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,0,0,?)',
-                (aid, loc_id, d, t, v['id'], sid, b['client_id'], b.get('status', 'booked'), b.get('source', 'phone'), v['price'], now_iso()))
+    addons = [x for x in (json.loads(v.get('addons') or '[]')) if x.get('name') in set(b.get('addons') or [])]
+    total = v['price'] + sum(float(x.get('price') or 0) for x in addons)
+    CON.execute('INSERT INTO appointments(id,location_id,date,time,service_id,staff_id,client_id,status,source,total,tip,paid,created_at,manage_token,addons,notes,spot) VALUES(?,?,?,?,?,?,?,?,?,?,0,0,?,?,?,?,?)',
+                (aid, loc_id, d, t, v['id'], sid, b['client_id'], b.get('status', 'booked'), b.get('source', 'phone'), total, now_iso(), manage_token(), json.dumps(addons), (b.get('notes') or '')[:300], b.get('spot')))
+    if b.get('status', 'booked') == 'booked' and not b.get('no_sync'):
+        take_deposit(loc_id, aid)
     if not b.get('no_sync'):
         hl_after_book(loc_id, aid)
     return dict(id=aid, staff_id=sid)
@@ -477,8 +501,8 @@ def h_staff_create(ctx):
     n = len(rows('SELECT id FROM staff WHERE location_id=?', (loc,)))
     sid = 's' + uid()
     L = one('SELECT * FROM locations WHERE id=?', (loc,))
-    CON.execute('INSERT INTO staff(id,location_id,name,role,color,pin,rate,sort) VALUES(?,?,?,?,?,?,?,?)',
-                (sid, loc, b['name'].strip(), b.get('role', ''), db.COLORS[n % len(db.COLORS)], str(b.get('pin', '')), float(b.get('rate', 0) or 0), n))
+    CON.execute('INSERT INTO staff(id,location_id,name,role,color,pin,rate,sort,role_level,email,phone) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+                (sid, loc, b['name'].strip(), b.get('role', ''), db.COLORS[n % len(db.COLORS)], str(b.get('pin', '')), float(b.get('rate', 0) or 0), n, b.get('level', 'staff') if b.get('level') in ('owner', 'desk', 'staff') else 'staff', b.get('email'), b.get('phone')))
     for k in range(6):
         CON.execute('INSERT INTO staff_hours VALUES(?,?,?,?)', (sid, k, L['open_time'], L['close_time']))
     for v in rows('SELECT id FROM services WHERE location_id=?', (loc,)):
@@ -489,8 +513,11 @@ def h_staff_create(ctx):
 def h_staff_update(ctx):
     b = ctx['body']
     s = staff_of(ctx['id'])
-    CON.execute('UPDATE staff SET name=?,role=?,rate=?,pin=? WHERE id=?',
-                (b.get('name', s['name']).strip(), b.get('role', s['role']), float(b.get('rate', s['rate']) or 0), str(b.get('pin', s['pin'])), s['id']))
+    lvl = b.get('level', s.get('role_level') or 'staff')
+    if lvl not in ('owner', 'desk', 'staff'):
+        raise ApiError('level must be owner, desk or staff')
+    CON.execute('UPDATE staff SET name=?,role=?,rate=?,pin=?,role_level=?,email=?,phone=? WHERE id=?',
+                (b.get('name', s['name']).strip(), b.get('role', s['role']), float(b.get('rate', s['rate']) or 0), str(b.get('pin', s['pin'])), lvl, b.get('email', s.get('email')), b.get('phone', s.get('phone')), s['id']))
     return state(ctx['loc'])
 
 
@@ -537,8 +564,8 @@ def h_service_create(ctx):
     b, loc = ctx['body'], ctx['loc']
     vid = 'v' + uid()
     n = len(rows('SELECT id FROM services WHERE location_id=?', (loc,)))
-    CON.execute('INSERT INTO services(id,location_id,cat,name,dur,price,emoji,online,sort) VALUES(?,?,?,?,?,?,?,1,?)',
-                (vid, loc, b.get('cat') or 'Services', b['name'].strip(), int(b.get('dur', 30)), float(b.get('price', 0) or 0), b.get('em', '✨'), n))
+    CON.execute('INSERT INTO services(id,location_id,cat,name,dur,price,emoji,online,sort,gap_min,deposit,addons,descr) VALUES(?,?,?,?,?,?,?,1,?,?,?,?,?)',
+                (vid, loc, b.get('cat') or 'Services', b['name'].strip(), int(b.get('dur', 30)), float(b.get('price', 0) or 0), b.get('em', '✨'), n, int(b.get('gap', 0) or 0), float(b.get('deposit', 0) or 0), json.dumps(b.get('addons') or []), (b.get('descr') or '')[:300]))
     for sid in b.get('staff', [s['id'] for s in rows('SELECT id FROM staff WHERE location_id=?', (loc,))]):
         CON.execute('INSERT OR IGNORE INTO service_staff VALUES(?,?)', (vid, sid))
     return state(loc)
@@ -547,9 +574,11 @@ def h_service_create(ctx):
 def h_service_update(ctx):
     b = ctx['body']
     v = service_of(ctx['id'])
-    CON.execute('UPDATE services SET cat=?,name=?,dur=?,price=?,online=? WHERE id=?',
+    CON.execute('UPDATE services SET cat=?,name=?,dur=?,price=?,online=?,gap_min=?,deposit=?,addons=?,descr=? WHERE id=?',
                 (b.get('cat', v['cat']), b.get('name', v['name']).strip(), int(b.get('dur', v['dur'])), float(b.get('price', v['price']) or 0),
-                 1 if b.get('online', bool(v['online'])) else 0, v['id']))
+                 1 if b.get('online', bool(v['online'])) else 0, int(b.get('gap', v.get('gap_min') or 0) or 0), float(b.get('deposit', v.get('deposit') or 0) or 0),
+                 json.dumps([dict(name=str(x.get('name', ''))[:40], price=float(x.get('price') or 0), min=int(x.get('min') or 0)) for x in b['addons'] if x.get('name')]) if isinstance(b.get('addons'), list) else (v.get('addons') or '[]'),
+                 (b.get('descr', v.get('descr')) or '')[:300], v['id']))
     if 'staff' in b:
         CON.execute('DELETE FROM service_staff WHERE service_id=?', (v['id'],))
         for sid in b['staff']:
@@ -575,10 +604,11 @@ def h_class_create(ctx):
 def h_class_update(ctx):
     b = ctx['body']
     c = need(one('SELECT * FROM classes WHERE id=?', (ctx['id'],)), 'class')
-    CON.execute('UPDATE classes SET name=?,time=?,dur=?,cap=?,price=?,staff_id=?,days=?,online=? WHERE id=?',
+    CON.execute('UPDATE classes SET name=?,time=?,dur=?,cap=?,price=?,staff_id=?,days=?,online=?,spots=?,descr=? WHERE id=?',
                 (b.get('name', c['name']).strip(), b.get('time', c['time']), int(b.get('dur', c['dur'])), int(b.get('cap', c['cap'])),
                  float(b.get('price', c['price']) or 0), b.get('staffId', c['staff_id']),
-                 ','.join(str(int(x)) for x in b['days']) if 'days' in b else c['days'], 1 if b.get('online', bool(c['online'])) else 0, c['id']))
+                 ','.join(str(int(x)) for x in b['days']) if 'days' in b else c['days'], 1 if b.get('online', bool(c['online'])) else 0,
+                 1 if b.get('spots', bool(c.get('spots'))) else 0, (b.get('descr', c.get('descr')) or '')[:300], c['id']))
     return state(ctx['loc'])
 
 
@@ -597,7 +627,10 @@ def h_attend_add(ctx):
         raise ApiError('Class is full', 409)
     if any(h['client_id'] == k['id'] for h in have):
         raise ApiError('Already checked in', 409)
-    CON.execute('INSERT INTO attendance(class_id,date,client_id,created_at) VALUES(?,?,?,?)', (c['id'], d, k['id'], now_iso()))
+    spot = b.get('spot')
+    if spot and any(h.get('spot') == spot for h in rows('SELECT spot FROM attendance WHERE class_id=? AND date=?', (c['id'], d))):
+        raise ApiError('Spot %s is taken' % spot, 409)
+    CON.execute('INSERT INTO attendance(class_id,date,client_id,created_at,spot) VALUES(?,?,?,?,?)', (c['id'], d, k['id'], now_iso(), spot))
     p = active_pass(k['id'])
     if p and p['remaining'] is not None:
         CON.execute('UPDATE client_passes SET remaining=remaining-1 WHERE id=?', (p['id'],))
@@ -614,6 +647,7 @@ def h_attend_add(ctx):
 def h_attend_remove(ctx):
     d = ctx['query'].get('date', today())
     CON.execute('DELETE FROM attendance WHERE class_id=? AND date=? AND client_id=?', (ctx['id'], d, ctx['sub']))
+    offer_waitlist(ctx['loc'], dict(class_id=ctx['id'], date=d))
     return state(ctx['loc'])
 
 
@@ -639,8 +673,12 @@ def h_pass_sell(ctx):
     p = need(one('SELECT * FROM passes WHERE id=?', (ctx['id'],)), 'pass')
     k = client_of(b['client_id'])
     remaining = p['credits'] if p['type'] in ('pack', 'intro') and p['credits'] else None
-    CON.execute('INSERT INTO client_passes(id,client_id,pass_id,remaining,expires,created_at) VALUES(?,?,?,?,?,?)',
-                (uid(), k['id'], p['id'], remaining, (date.today() + timedelta(days=p['days'])).isoformat(), now_iso()))
+    exp = (date.today() + timedelta(days=p['days'])).isoformat()
+    CON.execute('INSERT INTO client_passes(id,client_id,pass_id,remaining,expires,created_at,status,next_billing,auto_renew,price) VALUES(?,?,?,?,?,?,?,?,?,?)',
+                (uid(), k['id'], p['id'], remaining, exp, now_iso(), 'active', exp if p['type'] == 'unlimited' else None, 1 if p['type'] == 'unlimited' else 0, p['price']))
+    if b.get('method') == 'Gift card':
+        redeem_giftcard(ctx['loc'], b.get('code'), p['price'])
+    audit(ctx['loc'], 'pass.sell', '%s %s' % (k['name'], p['name']))
     first = one('SELECT id FROM staff WHERE location_id=? ORDER BY sort LIMIT 1', (ctx['loc'],))
     add_sale(ctx['loc'], k['id'], first['id'] if first else None, p['name'], p['price'], 0, b.get('method', 'Tap to pay'))
     cp = one('SELECT * FROM client_passes WHERE client_id=? ORDER BY rowid DESC LIMIT 1', (k['id'],))
@@ -675,7 +713,13 @@ def h_appt_create(ctx):
             sid = qualified_staff(v['id'])[0]
         r = book(loc, dict(service_id=v['id'], staff_id=sid, client_id=b['client_id'], date=today(), time=t, source='walkin', status='arrived'), enforce=False)
     else:
-        r = book(loc, dict(service_id=b['service_id'], staff_id=b.get('staff_id'), client_id=b['client_id'], date=b.get('date'), time=b['time'], source=b.get('source', 'phone')))
+        r = book(loc, dict(service_id=b['service_id'], staff_id=b.get('staff_id'), client_id=b['client_id'], date=b.get('date'), time=b['time'], source=b.get('source', 'phone'), addons=b.get('addons'), notes=b.get('notes'), spot=b.get('spot')))
+        rep_ = b.get('repeat') or {}
+        if rep_.get('count'):
+            base = dict(service_id=b['service_id'], staff_id=r['staff_id'], client_id=b['client_id'], date=b.get('date') or today(), time=b['time'], source=b.get('source', 'phone'), addons=b.get('addons'))
+            series, made, skipped = book_series(loc, base, int(rep_.get('every_weeks', 1)), min(int(rep_['count']), 26))
+            CON.execute('UPDATE appointments SET series_id=? WHERE id=?', (series, r['id']))
+            return dict(id=r['id'], staff_id=r['staff_id'], series=dict(id=series, made=made, skipped=skipped), state=state(loc))
     return dict(id=r['id'], staff_id=r['staff_id'], state=state(loc))
 
 
@@ -702,11 +746,28 @@ def h_unarrive(ctx):
 
 
 def h_noshow(ctx):
-    return set_status(ctx, ('booked', 'arrived'), 'noshow')
+    a = appt_of(ctx['id'])
+    st = set_status(ctx, ('booked', 'arrived'), 'noshow')
+    fee = apply_fee(ctx['loc'], a['id'], 'noshow') if ctx['body'].get('fee', True) else 0
+    offer_waitlist(ctx['loc'], a)
+    st = state(ctx['loc']); st['fee'] = fee
+    return st
 
 
 def h_cancel(ctx):
-    return set_status(ctx, ('booked', 'arrived'), 'cancelled')
+    a = appt_of(ctx['id'])
+    L = one('SELECT * FROM locations WHERE id=?', (ctx['loc'],))
+    late = is_late(a, L)
+    if ctx['body'].get('series') and a.get('series_id'):
+        for x in rows("SELECT id FROM appointments WHERE series_id=? AND status='booked' AND (date>? OR (date=? AND time>=?))", (a['series_id'], a['date'], a['date'], a['time'])):
+            CON.execute("UPDATE appointments SET status='cancelled' WHERE id=?", (x['id'],))
+            hl_after_status(ctx['loc'], x['id'], 'cancelled')
+        return state(ctx['loc'])
+    set_status(ctx, ('booked', 'arrived'), 'cancelled')
+    fee = apply_fee(ctx['loc'], a['id'], 'late') if (late and ctx['body'].get('fee', True)) else 0
+    offer_waitlist(ctx['loc'], a)
+    st = state(ctx['loc']); st['fee'] = fee; st['late'] = late
+    return st
 
 
 def h_pay(ctx):
@@ -716,9 +777,10 @@ def h_pay(ctx):
         raise ApiError('Appointment is ' + a['status'], 409)
     v = service_of(a['service_id'])
     method = b.get('method', 'Tap to pay')
-    if method not in ('Tap to pay', 'Card on file', 'Cash', 'Pass'):
+    if method not in ('Tap to pay', 'Card on file', 'Cash', 'Pass', 'Gift card'):
         raise ApiError('bad method')
     tip = round(float(b.get('tip', 0) or 0), 2)
+    price = float(a['total'] or v['price'])  # includes add-ons
     if method == 'Pass':
         p = active_pass(a['client_id'], v['name'])
         if not p:
@@ -727,13 +789,22 @@ def h_pay(ctx):
             CON.execute('UPDATE client_passes SET remaining=remaining-1 WHERE id=?', (p['id'],))
         total = 0
     else:
-        total = v['price']
-    CON.execute('UPDATE appointments SET status=?,paid=1,tip=?,total=? WHERE id=?', ('done', tip, total, a['id']))
+        total = max(0, price - float(a.get('deposit') or 0))  # deposit already taken
+    if method == 'Gift card':
+        redeem_giftcard(ctx['loc'], b.get('code'), total + tip)
+    if method == 'Card on file':
+        k = client_of(a['client_id'])
+        if not k.get('card_last4'):
+            raise ApiError('No card on file for this client', 409)
+    CON.execute('UPDATE appointments SET status=?,paid=1,tip=?,total=? WHERE id=?', ('done', tip, 0 if method == 'Pass' else price, a['id']))
     CON.execute('UPDATE clients SET visits=visits+1 WHERE id=?', (a['client_id'],))
-    add_sale(ctx['loc'], a['client_id'], a['staff_id'], v['name'], v['price'], tip, method, a['date'])
+    label = v['name'] + (' + ' + ', '.join(x['name'] for x in json.loads(a.get('addons') or '[]')) if a.get('addons') and a['addons'] != '[]' else '')
+    CON.execute('INSERT INTO sales(id,location_id,date,client_id,staff_id,label,total,tip,method,created_at,appointment_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+                (uid(), ctx['loc'], a['date'], a['client_id'], a['staff_id'], label, price if method != 'Pass' else price, tip, method, now_iso(), a['id']))
+    audit(ctx['loc'], 'pay', '%s $%.2f %s' % (label, total + tip, method))
     hl_after_status(ctx['loc'], a['id'], 'done')
     hl_after_pay(ctx['loc'], a['id'], method, tip)
-    return dict(charged=total + tip, state=state(ctx['loc']))
+    return dict(charged=total + tip, deposit=a.get('deposit') or 0, state=state(ctx['loc']))
 
 
 def h_availability(ctx):
@@ -765,7 +836,9 @@ def h_public_info(ctx):
     L = public_loc(ctx['slug'])
     st = state(L['id'])
     return dict(name=L['name'], city=L['city'], slug=L['slug'], status=L['status'], type=L['type'], vocab=st['vocab'],
-                services=[dict(id=v['id'], cat=v['cat'], name=v['name'], dur=v['dur'], price=v['price'], em=v['em'], staff=v['staff']) for v in st['services'] if v['online']],
+                services=[dict(id=v['id'], cat=v['cat'], name=v['name'], dur=v['dur'], price=v['price'], em=v['em'], staff=v['staff'], deposit=v['deposit'], addons=v['addons'], descr=v['descr']) for v in st['services'] if v['online']],
+                classes=[dict(id=c['id'], name=c['name'], time=c['time'], dur=c['dur'], cap=c['cap'], price=c['price'], days=c['days'], staffId=c['staffId']) for c in st['classes'] if c['online'] and st['features']['classes']],
+                policy=dict(cancel_hours=st['rules']['cancelHours'], late_fee=st['policy'].get('late_cancel_fee'), noshow_fee=st['policy'].get('noshow_fee'), require_card=bool(st['policy'].get('require_card_online'))),
                 staff=[dict(id=s['id'], name=s['name'], role=s['role'], color=s['color']) for s in st['staff']],
                 pages={p['id']: p['on'] for p in st['pages']}, features=st['features'], cancelHours=st['rules']['cancelHours'], today=st['today'], website=(st.get('hlFunnel') or {}).get('url'))
 
@@ -799,10 +872,17 @@ def h_public_book(ctx):
     if not k and email:
         k = one('SELECT * FROM clients WHERE location_id=? AND lower(email)=lower(?)', (L['id'], email))
     kid = k['id'] if k else new_client(L['id'], name, phone or None, email or None)
-    r = book(L['id'], dict(service_id=b['service_id'], staff_id=b.get('staff_id') or None, client_id=kid, date=d, time=b['time'], source='online'))
+    if b.get('card'):
+        c4 = ''.join(ch for ch in str(b['card'].get('last4', '')) if ch.isdigit())[-4:]
+        if len(c4) == 4:
+            CON.execute('UPDATE clients SET card_brand=?, card_last4=? WHERE id=?', (str(b['card'].get('brand', 'Card'))[:20], c4, kid))
+    if policy_of(L).get('require_card_online') and not one('SELECT card_last4 FROM clients WHERE id=?', (kid,))['card_last4']:
+        raise ApiError('A card is needed to hold this booking', 409)
+    r = book(L['id'], dict(service_id=b['service_id'], staff_id=b.get('staff_id') or None, client_id=kid, date=d, time=b['time'], source='online', addons=b.get('addons'), notes=b.get('notes')))
     s = staff_of(r['staff_id'])
     v = service_of(b['service_id'])
-    return dict(ok=True, id=r['id'], staff=s['name'], service=v['name'], date=d, time=b['time'], business=L['name'])
+    a = one('SELECT manage_token, deposit FROM appointments WHERE id=?', (r['id'],))
+    return dict(ok=True, id=r['id'], staff=s['name'], service=v['name'], date=d, time=b['time'], business=L['name'], manage='/manage/%s/%s' % (L['slug'], a['manage_token']), deposit=a.get('deposit') or 0)
 
 
 # ---------------------------------------------------------------- HighLevel endpoints
@@ -1362,6 +1442,488 @@ def hl_expiring_passes_tick():
     threading.Timer(3600, hl_expiring_passes_tick).start()
 
 
+# ---------------------------------------------------------------- depth: policy, roles, cards, deposits & fees
+def policy_of(L):
+    p = dict(noshow_fee=50, late_cancel_fee=25, deposit_default=0, reminder_hours=24, require_card_online=False, waitlist=True, self_service=True)
+    try:
+        p.update(json.loads(L.get('policy') or '{}'))
+    except ValueError:
+        pass
+    return p
+
+
+def audit(loc_id, action, detail='', actor=None):
+    CON.execute('INSERT INTO audit(ts,location_id,actor,action,detail) VALUES(?,?,?,?,?)', (now_iso(), loc_id, actor, action, str(detail)[:300]))
+    CON.execute('DELETE FROM audit WHERE id NOT IN (SELECT id FROM audit ORDER BY id DESC LIMIT 500)')
+
+
+def manage_token():
+    return uuid.uuid4().hex[:20]
+
+
+def h_auth_pin(ctx):
+    """PIN sign-in on the shared tablet. Returns who is at the desk and what they may see."""
+    pin = str(ctx['body'].get('pin', '')).strip()
+    s = one('SELECT id,name,role,role_level,color FROM staff WHERE location_id=? AND pin=?', (ctx['loc'], pin))
+    if not s:
+        raise ApiError('That PIN does not match anyone on the team', 401)
+    audit(ctx['loc'], 'signin', s['name'], s['name'])
+    return dict(staff=dict(id=s['id'], name=s['name'], role=s['role'], level=s['role_level'] or 'staff', color=s['color']))
+
+
+def h_client_update(ctx):
+    b = ctx['body']
+    k = client_of(ctx['id'])
+    fields = dict(name=b.get('name', k['name']).strip() or k['name'], phone=(b.get('phone', k['phone']) or '').strip(), email=(b.get('email', k.get('email')) or '').strip() or None,
+                  notes=b.get('notes', k.get('notes')), tags=','.join(sorted({t.strip() for t in (b['tags'] if isinstance(b.get('tags'), list) else str(b.get('tags', k.get('tags') or '')).split(',')) if t.strip()})) if 'tags' in b else k.get('tags'),
+                  birthday=b.get('birthday', k.get('birthday')) or None, preferred_staff=b.get('preferred_staff', k.get('preferred_staff')) or None)
+    CON.execute('UPDATE clients SET name=?,phone=?,email=?,notes=?,tags=?,birthday=?,preferred_staff=? WHERE id=?',
+                (fields['name'], fields['phone'], fields['email'], fields['notes'], fields['tags'], fields['birthday'], fields['preferred_staff'], k['id']))
+    if k.get('hl_contact_id') and hl_active(ctx['loc'], 'contacts') and (fields['name'] != k['name'] or fields['phone'] != k['phone'] or fields['email'] != k.get('email')):
+        hl_try(ctx['loc'], 'contact.upsert ' + fields['name'], lambda: hl.upsert_contact_full(fields['name'], fields['phone'], fields['email'] or ''))
+    return state(ctx['loc'])
+
+
+def h_client_card(ctx):
+    """Save a card on file. In production this is the token from HighLevel Payments' card element; here brand + last4 stand in."""
+    b = ctx['body']
+    k = client_of(ctx['id'])
+    if ctx.get('method') == 'DELETE' or b.get('remove'):
+        CON.execute('UPDATE clients SET card_brand=NULL, card_last4=NULL WHERE id=?', (k['id'],))
+        audit(ctx['loc'], 'card.remove', k['name'])
+    else:
+        last4 = ''.join(ch for ch in str(b.get('last4', '')) if ch.isdigit())[-4:]
+        if len(last4) != 4:
+            raise ApiError('Card needs four last digits')
+        CON.execute('UPDATE clients SET card_brand=?, card_last4=? WHERE id=?', (b.get('brand', 'Card')[:20], last4, k['id']))
+        audit(ctx['loc'], 'card.save', '%s · %s ****%s' % (k['name'], b.get('brand', 'Card'), last4))
+    return state(ctx['loc'])
+
+
+def charge_card(loc_id, k, amount, label, appointment_id=None, staff_id=None):
+    """Charge the card on file (simulated) and record the sale. Returns the sale amount or 0 when no card."""
+    if not k.get('card_last4') or amount <= 0:
+        return 0
+    CON.execute('INSERT INTO sales(id,location_id,date,client_id,staff_id,label,total,tip,method,created_at,appointment_id,note) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
+                (uid(), loc_id, today(), k['id'], staff_id, label, round(amount, 2), 0, 'Card on file', now_iso(), appointment_id, '%s ****%s' % (k.get('card_brand') or 'Card', k['card_last4'])))
+    audit(loc_id, 'charge', '%s %s $%.2f' % (k['name'], label, amount))
+    return round(amount, 2)
+
+
+def take_deposit(loc_id, aid):
+    a = one('SELECT a.*, v.deposit svc_deposit, v.name svc_name FROM appointments a JOIN services v ON v.id=a.service_id WHERE a.id=?', (aid,))
+    if a:
+        a = dict(a); a['deposit'], a['svc_deposit_val'] = a.get('deposit'), a.get('svc_deposit')
+    if not a or not float(a.get('svc_deposit_val') or 0) or float(a.get('deposit') or 0):
+        return 0
+    L = one('SELECT * FROM locations WHERE id=?', (loc_id,))
+    dep = float(a['svc_deposit_val'] or policy_of(L).get('deposit_default') or 0)
+    k = client_of(a['client_id'])
+    got = charge_card(loc_id, k, dep, 'Deposit · ' + a['svc_name'], aid, a['staff_id'])
+    if got:
+        CON.execute('UPDATE appointments SET deposit=? WHERE id=?', (got, aid))
+    return got
+
+
+def apply_fee(loc_id, aid, kind):
+    """No-show or late-cancel fee from policy, charged to the card on file when there is one."""
+    a = one('SELECT a.*, v.name svc_name FROM appointments a JOIN services v ON v.id=a.service_id WHERE a.id=?', (aid,))
+    L = one('SELECT * FROM locations WHERE id=?', (loc_id,))
+    pol = policy_of(L)
+    fee = float(pol.get('noshow_fee' if kind == 'noshow' else 'late_cancel_fee') or 0)
+    if a.get('deposit'):
+        fee = max(0, fee - a['deposit'])  # the deposit is forfeited and counts toward the fee
+        CON.execute('UPDATE appointments SET fee=? WHERE id=?', (a['deposit'], aid))
+    if fee <= 0:
+        return 0
+    k = client_of(a['client_id'])
+    got = charge_card(loc_id, k, fee, ('No-show fee' if kind == 'noshow' else 'Late cancellation') + ' · ' + a['svc_name'], aid, a['staff_id'])
+    if got:
+        CON.execute('UPDATE appointments SET fee=COALESCE(fee,0)+? WHERE id=?', (got, aid))
+    return got
+
+
+def is_late(a, L):
+    if a['date'] > today():
+        return False
+    return (mins(a['time']) - now_mins()) < L['cancel_hours'] * 60 if a['date'] == today() else True
+
+
+# ---------------------------------------------------------------- blocks & time off (availability aware)
+def blocks_for(sid, d):
+    return rows('SELECT * FROM blocks WHERE date=? AND (staff_id=? OR staff_id IS NULL)', (d, sid))
+
+
+def h_block_create(ctx):
+    b = ctx['body']
+    loc = ctx['loc']
+    kind = b.get('kind', 'block')
+    if kind not in ('block', 'timeoff'):
+        raise ApiError('kind must be block or timeoff')
+    dates = b.get('dates') or [b.get('date') or today()]
+    ids = []
+    for d in dates:
+        bid = 'b' + uid()
+        CON.execute('INSERT INTO blocks(id,location_id,staff_id,date,start,end,kind,reason,created_at) VALUES(?,?,?,?,?,?,?,?,?)',
+                    (bid, loc, b.get('staff_id') or None, d, b.get('start', '00:00') if kind == 'block' else '00:00', b.get('end', '23:59') if kind == 'block' else '23:59', kind, (b.get('reason') or ('Time off' if kind == 'timeoff' else 'Blocked'))[:80], now_iso()))
+        ids.append(bid)
+    audit(loc, 'block.create', '%s %s' % (kind, ', '.join(dates)))
+    return dict(ids=ids, state=state(loc))
+
+
+def h_block_delete(ctx):
+    CON.execute('DELETE FROM blocks WHERE id=? AND location_id=?', (ctx['id'], ctx['loc']))
+    return state(ctx['loc'])
+
+
+# ---------------------------------------------------------------- reschedule, recurring, self-service
+def h_appt_update(ctx):
+    """Move an appointment: new date, time or staff member. Re-checks availability."""
+    b = ctx['body']
+    a = appt_of(ctx['id'])
+    if a['status'] not in ('booked', 'arrived'):
+        raise ApiError('Only upcoming appointments can be moved', 409)
+    v = service_of(a['service_id'])
+    d, t, sid = b.get('date', a['date']), b.get('time', a['time']), b.get('staff_id', a['staff_id'])
+    if sid not in qualified_staff(v['id']):
+        raise ApiError('That staff member does not offer this service', 409)
+    if not one('SELECT 1 FROM staff_hours WHERE staff_id=? AND dow=?', (sid, dow(d))):
+        raise ApiError('Not working that day', 409)
+    if staff_busy(sid, d, t, v['dur'] + (v.get('gap_min') or 0), exclude=a['id']):
+        raise ApiError('That slot is taken', 409)
+    CON.execute('UPDATE appointments SET date=?, time=?, staff_id=? WHERE id=?', (d, t, sid, a['id']))
+    if 'notes' in b:
+        CON.execute('UPDATE appointments SET notes=? WHERE id=?', (b['notes'], a['id']))
+    audit(ctx['loc'], 'appointment.move', '%s → %s %s' % (a['id'], d, t))
+    if a.get('hl_event_id') and hl_active(ctx['loc'], 'appointments'):
+        tz = hl_tz()
+        hl_try(ctx['loc'], 'appointment.move', lambda: hl.request('PUT', '/calendars/events/appointments/' + a['hl_event_id'], dict(startTime=hl.iso_at(d, t, tz), endTime=hl.iso_at(d, tstr(mins(t) + v['dur']), tz)), version='2021-04-15'))
+    return state(ctx['loc'])
+
+
+def book_series(loc_id, base, every_weeks, count):
+    """Repeat a booking every N weeks for `count` more occurrences, skipping dates that are not available."""
+    sid_series = 'r' + uid()
+    made, skipped = [], []
+    v = service_of(base['service_id'])
+    L = one('SELECT * FROM locations WHERE id=?', (loc_id,))
+    for i in range(1, count + 1):
+        d = (date.fromisoformat(base['date']) + timedelta(weeks=every_weeks * i)).isoformat()
+        if base['time'] in slots(v['id'], base['staff_id'], d, L['slot_min']):
+            r = book(loc_id, dict(base, date=d, no_sync=False))
+            CON.execute('UPDATE appointments SET series_id=? WHERE id=?', (sid_series, r['id']))
+            made.append(d)
+        else:
+            skipped.append(d)
+    return sid_series, made, skipped
+
+
+def h_public_manage(ctx):
+    """What the client sees from the link in their confirmation."""
+    L = public_loc(ctx['slug'])
+    a = one('SELECT a.*, v.name svc_name, v.dur, v.price, s.name staff_name, c.name client_name FROM appointments a JOIN services v ON v.id=a.service_id JOIN staff s ON s.id=a.staff_id JOIN clients c ON c.id=a.client_id WHERE a.manage_token=? AND a.location_id=?', (ctx['token'], L['id']))
+    if not a:
+        raise ApiError('This link is no longer valid', 404)
+    pol = policy_of(L)
+    return dict(business=L['name'], service=a['svc_name'], staff=a['staff_name'], staff_id=a['staff_id'], service_id=a['service_id'], client=a['client_name'], date=a['date'], time=a['time'], dur=a['dur'], price=a['price'],
+                status=a['status'], deposit=a.get('deposit') or 0, cancel_hours=L['cancel_hours'], late_fee=pol.get('late_cancel_fee') or 0, late=is_late(a, L),
+                self_service=bool(pol.get('self_service', True)), today=today())
+
+
+def h_public_manage_cancel(ctx):
+    L = public_loc(ctx['slug'])
+    a = one('SELECT * FROM appointments WHERE manage_token=? AND location_id=?', (ctx['token'], L['id']))
+    if not a or a['status'] not in ('booked',):
+        raise ApiError('This booking cannot be cancelled online', 409)
+    late = is_late(a, L)
+    CON.execute("UPDATE appointments SET status='cancelled' WHERE id=?", (a['id'],))
+    fee = apply_fee(L['id'], a['id'], 'late') if late else 0
+    hl_after_status(L['id'], a['id'], 'cancelled')
+    offer_waitlist(L['id'], a)
+    audit(L['id'], 'appointment.cancel.self', a['id'] + (' late' if late else ''))
+    return dict(ok=True, late=late, fee=fee)
+
+
+def h_public_manage_move(ctx):
+    L = public_loc(ctx['slug'])
+    a = one('SELECT * FROM appointments WHERE manage_token=? AND location_id=?', (ctx['token'], L['id']))
+    if not a or a['status'] != 'booked':
+        raise ApiError('This booking cannot be moved online', 409)
+    if is_late(a, L) and not policy_of(L).get('self_service', True):
+        raise ApiError('Too close to the appointment to move it online. Please call.', 409)
+    b = ctx['body']
+    ctx2 = dict(ctx, loc=L['id'], id=a['id'], body=dict(date=b['date'], time=b['time'], staff_id=b.get('staff_id') or a['staff_id']))
+    h_appt_update(ctx2)
+    return dict(ok=True, date=b['date'], time=b['time'])
+
+
+# ---------------------------------------------------------------- waitlist
+def h_waitlist_add(ctx):
+    b = ctx['body']
+    loc = ctx['loc']
+    k = client_of(b['client_id'])
+    wid = 'w' + uid()
+    CON.execute('INSERT INTO waitlist(id,location_id,client_id,class_id,service_id,staff_id,date,status,created_at) VALUES(?,?,?,?,?,?,?,?,?)',
+                (wid, loc, k['id'], b.get('class_id') or None, b.get('service_id') or None, b.get('staff_id') or None, b.get('date') or today(), 'waiting', now_iso()))
+    audit(loc, 'waitlist.add', k['name'])
+    return dict(id=wid, state=state(loc))
+
+
+def h_waitlist_remove(ctx):
+    CON.execute('DELETE FROM waitlist WHERE id=? AND location_id=?', (ctx['id'], ctx['loc']))
+    return state(ctx['loc'])
+
+
+def h_waitlist_book(ctx):
+    """Desk converts a waitlist entry into a booking or a class seat."""
+    w = need(one('SELECT * FROM waitlist WHERE id=? AND location_id=?', (ctx['id'], ctx['loc'])), 'waitlist entry')
+    b = ctx['body']
+    if w['class_id']:
+        h_attend_add(dict(ctx, id=w['class_id'], body=dict(client_id=w['client_id'], date=w['date'])))
+    else:
+        book(ctx['loc'], dict(service_id=w['service_id'], staff_id=w.get('staff_id') or b.get('staff_id'), client_id=w['client_id'], date=w['date'], time=b['time'], source='phone'))
+    CON.execute("UPDATE waitlist SET status='booked' WHERE id=?", (w['id'],))
+    return state(ctx['loc'])
+
+
+def offer_waitlist(loc_id, freed):
+    """A booking or seat was freed: offer it to the first person waiting for that class or that staff member and day."""
+    if isinstance(freed, dict) and freed.get('class_id'):
+        w = one("SELECT * FROM waitlist WHERE location_id=? AND class_id=? AND date=? AND status='waiting' ORDER BY created_at LIMIT 1", (loc_id, freed['class_id'], freed['date']))
+    else:
+        w = one("SELECT * FROM waitlist WHERE location_id=? AND date=? AND status='waiting' AND class_id IS NULL AND (staff_id IS NULL OR staff_id=?) AND (service_id IS NULL OR service_id=?) ORDER BY created_at LIMIT 1", (loc_id, freed['date'], freed['staff_id'], freed['service_id']))
+    if not w:
+        return None
+    CON.execute("UPDATE waitlist SET status='offered', offered_at=? WHERE id=?", (now_iso(), w['id']))
+    k = client_of(w['client_id'])
+    L = one('SELECT * FROM locations WHERE id=?', (loc_id,))
+    audit(loc_id, 'waitlist.offer', k['name'] + ' · ' + w['date'])
+    if hl_active(loc_id, 'sms') and hl.clean_phone(k['phone']):
+        cid = hl_contact_for(loc_id, k['id'])
+        if cid:
+            hl_try(loc_id, 'sms.waitlist ' + k['name'], lambda: hl.send_sms(cid, 'Good news from %s: a spot opened on %s. Reply YES to take it.' % (L['name'], w['date'])))
+    return w['id']
+
+
+# ---------------------------------------------------------------- memberships: billing, freeze, cancel
+def h_pass_freeze(ctx):
+    cp = need(one('SELECT cp.*, c.location_id FROM client_passes cp JOIN clients c ON c.id=cp.client_id WHERE cp.id=?', (ctx['id'],)), 'membership')
+    until = ctx['body'].get('until') or (date.today() + timedelta(days=30)).isoformat()
+    CON.execute("UPDATE client_passes SET status='frozen', frozen_until=? WHERE id=?", (until, cp['id']))
+    audit(ctx['loc'], 'membership.freeze', cp['id'] + ' until ' + until)
+    return state(ctx['loc'])
+
+
+def h_pass_unfreeze(ctx):
+    cp = need(one('SELECT * FROM client_passes WHERE id=?', (ctx['id'],)), 'membership')
+    CON.execute("UPDATE client_passes SET status='active', frozen_until=NULL WHERE id=?", (cp['id'],))
+    return state(ctx['loc'])
+
+
+def h_pass_cancel(ctx):
+    cp = need(one('SELECT * FROM client_passes WHERE id=?', (ctx['id'],)), 'membership')
+    CON.execute("UPDATE client_passes SET status='cancelled', auto_renew=0 WHERE id=?", (cp['id'],))
+    audit(ctx['loc'], 'membership.cancel', cp['id'])
+    return state(ctx['loc'])
+
+
+def bill_memberships_tick():
+    """Daily: charge memberships that are due, extend them, mirror as an invoice when Invoices is on."""
+    with LOCK:
+        try:
+            for cp in rows("SELECT cp.*, c.location_id, c.name, c.card_last4, p.name pass_name, p.days, p.price pprice FROM client_passes cp JOIN clients c ON c.id=cp.client_id JOIN passes p ON p.id=cp.pass_id WHERE cp.auto_renew=1 AND cp.status='active' AND cp.next_billing IS NOT NULL AND cp.next_billing<=?", (today(),)):
+                amount = float(cp.get('price') or cp['pprice'] or 0)
+                k = client_of(cp['client_id'])
+                got = charge_card(cp['location_id'], k, amount, 'Membership · ' + cp['pass_name'])
+                if not got:
+                    CON.execute('INSERT INTO sales(id,location_id,date,client_id,staff_id,label,total,tip,method,created_at,note) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+                                (uid(), cp['location_id'], today(), k['id'], None, 'Membership · ' + cp['pass_name'], amount, 0, 'Due at desk', now_iso(), 'no card on file'))
+                nxt = (date.fromisoformat(cp['next_billing']) + timedelta(days=cp['days'])).isoformat()
+                CON.execute('UPDATE client_passes SET next_billing=?, expires=? WHERE id=?', (nxt, nxt, cp['id']))
+                audit(cp['location_id'], 'membership.bill', '%s %s $%.2f%s' % (k['name'], cp['pass_name'], amount, '' if got else ' (no card, due at desk)'))
+            # frozen memberships thaw
+            CON.execute("UPDATE client_passes SET status='active', frozen_until=NULL WHERE status='frozen' AND frozen_until<=?", (today(),))
+            CON.commit()
+        except Exception:  # noqa
+            CON.rollback()
+    threading.Timer(6 * 3600, bill_memberships_tick).start()
+
+
+def h_bill_now(ctx):
+    """Run the billing cycle immediately (demo and month-end)."""
+    before = one('SELECT COUNT(*) n FROM sales WHERE location_id=?', (ctx['loc'],))['n']
+    threading.Timer(0, lambda: None).cancel()
+    # inline version of the tick for this request (LOCK already held by the dispatcher)
+    for cp in rows("SELECT cp.*, c.location_id, c.name, p.name pass_name, p.days, p.price pprice FROM client_passes cp JOIN clients c ON c.id=cp.client_id JOIN passes p ON p.id=cp.pass_id WHERE c.location_id=? AND cp.auto_renew=1 AND cp.status='active' AND cp.next_billing IS NOT NULL AND cp.next_billing<=?", (ctx['loc'], today())):
+        amount = float(cp.get('price') or cp['pprice'] or 0)
+        k = client_of(cp['client_id'])
+        got = charge_card(ctx['loc'], k, amount, 'Membership · ' + cp['pass_name'])
+        if not got:
+            CON.execute('INSERT INTO sales(id,location_id,date,client_id,staff_id,label,total,tip,method,created_at,note) VALUES(?,?,?,?,?,?,?,?,?,?,?)', (uid(), ctx['loc'], today(), k['id'], None, 'Membership · ' + cp['pass_name'], amount, 0, 'Due at desk', now_iso(), 'no card on file'))
+        nxt = (date.fromisoformat(cp['next_billing']) + timedelta(days=cp['days'])).isoformat()
+        CON.execute('UPDATE client_passes SET next_billing=?, expires=? WHERE id=?', (nxt, nxt, cp['id']))
+    after = one('SELECT COUNT(*) n FROM sales WHERE location_id=?', (ctx['loc'],))['n']
+    return dict(billed=after - before, state=state(ctx['loc']))
+
+
+# ---------------------------------------------------------------- gift cards & refunds
+def h_giftcard_create(ctx):
+    b = ctx['body']
+    amount = float(b.get('amount', 0) or 0)
+    if amount <= 0:
+        raise ApiError('Amount must be positive')
+    import random
+    code = 'GC-' + ''.join(random.choice('ABCDEFGHJKLMNPQRSTUVWXYZ23456789') for _ in range(8))
+    CON.execute('INSERT INTO giftcards(id,location_id,code,balance,initial,client_id,created_at) VALUES(?,?,?,?,?,?,?)', (uid(), ctx['loc'], code, amount, amount, b.get('client_id') or None, now_iso()))
+    add_sale(ctx['loc'], b.get('client_id'), None, 'Gift card ' + code, amount, 0, b.get('method', 'Tap to pay'))
+    return dict(code=code, state=state(ctx['loc']))
+
+
+def redeem_giftcard(loc_id, code, amount):
+    g = one('SELECT * FROM giftcards WHERE location_id=? AND code=?', (loc_id, (code or '').strip().upper()))
+    if not g:
+        raise ApiError('Gift card not found', 404)
+    if g['balance'] < amount - 0.005:
+        raise ApiError('Gift card balance is $%.2f' % g['balance'], 409)
+    CON.execute('UPDATE giftcards SET balance=balance-? WHERE id=?', (amount, g['id']))
+    return g
+
+
+def h_refund(ctx):
+    s = need(one('SELECT * FROM sales WHERE id=? AND location_id=?', (ctx['id'], ctx['loc'])), 'sale')
+    if s.get('refund_of') or one('SELECT 1 FROM sales WHERE refund_of=?', (s['id'],)):
+        raise ApiError('Already refunded', 409)
+    amount = float(ctx['body'].get('amount') or (s['total'] + s['tip']))
+    CON.execute('INSERT INTO sales(id,location_id,date,client_id,staff_id,label,total,tip,method,created_at,refund_of,note) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
+                (uid(), ctx['loc'], today(), s['client_id'], s['staff_id'], 'Refund · ' + s['label'], -round(amount, 2), 0, s['method'], now_iso(), s['id'], ctx['body'].get('reason', '')[:120]))
+    audit(ctx['loc'], 'refund', '%s $%.2f' % (s['label'], amount))
+    return state(ctx['loc'])
+
+
+# ---------------------------------------------------------------- kiosk
+def h_public_kiosk(ctx):
+    """Self check-in: phone digits or membership code. Checks in today's appointment or class and reports membership status."""
+    L = public_loc(ctx['slug'])
+    q = ''.join(ch for ch in str(ctx['body'].get('q', '')) if ch.isdigit())
+    if len(q) < 4:
+        raise ApiError('Enter the last 4 digits of your mobile number')
+    cands = [c for c in rows('SELECT * FROM clients WHERE location_id=?', (L['id'],)) if ''.join(ch for ch in (c['phone'] or '') if ch.isdigit()).endswith(q)]
+    if not cands:
+        raise ApiError('We could not find you. Ask at the desk.', 404)
+    if len(cands) > 1 and len(q) < 7:
+        raise ApiError('More than one match. Enter more digits.', 409)
+    k = cands[0]
+    out = dict(name=k['name'].split(' ')[0], checked_in=[], membership=None)
+    for a in rows("SELECT a.*, v.name svc_name, s.name staff_name FROM appointments a JOIN services v ON v.id=a.service_id JOIN staff s ON s.id=a.staff_id WHERE a.client_id=? AND a.date=? AND a.status='booked' AND ABS(?-(CAST(substr(a.time,1,2) AS INT)*60+CAST(substr(a.time,4,2) AS INT)))<=90", (k['id'], today(), now_mins())):
+        CON.execute("UPDATE appointments SET status='arrived' WHERE id=?", (a['id'],))
+        out['checked_in'].append('%s with %s at %s' % (a['svc_name'], a['staff_name'].split(' ')[0], a['time']))
+    w = str(dow(today()))
+    for c in rows('SELECT * FROM classes WHERE location_id=?', (L['id'],)):
+        if w in c['days'].split(',') and abs(mins(c['time']) - now_mins()) <= 45:
+            have = [r['client_id'] for r in rows('SELECT client_id FROM attendance WHERE class_id=? AND date=?', (c['id'], today()))]
+            if k['id'] not in have and len(have) < c['cap']:
+                try:
+                    h_attend_add(dict(ctx, loc=L['id'], id=c['id'], body=dict(client_id=k['id'], date=today())))
+                    out['checked_in'].append(c['name'] + ' at ' + c['time'])
+                except ApiError:
+                    pass
+    cp = one("SELECT cp.*, p.name pass_name FROM client_passes cp JOIN passes p ON p.id=cp.pass_id WHERE cp.client_id=? AND cp.expires>=? ORDER BY cp.rowid DESC LIMIT 1", (k['id'], today()))
+    if cp:
+        out['membership'] = dict(name=cp['pass_name'], status=cp.get('status') or 'active', remaining=cp['remaining'], expires=cp['expires'])
+    audit(L['id'], 'kiosk.checkin', k['name'] + ' · ' + ('; '.join(out['checked_in']) or 'nothing due'))
+    return out
+
+
+# ---------------------------------------------------------------- insights
+def h_insights(ctx):
+    loc = ctx['loc']
+    days = int(ctx['query'].get('days', 30))
+    since = (date.today() - timedelta(days=days - 1)).isoformat()
+    sales = rows('SELECT date,total,tip,method,label,client_id,staff_id FROM sales WHERE location_id=? AND date>=?', (loc, since))
+    appts = rows('SELECT a.*, v.name svc_name FROM appointments a JOIN services v ON v.id=a.service_id WHERE a.location_id=? AND a.date>=? AND a.date<=?', (loc, since, today()))
+    by_day = {}
+    for i in range(days):
+        by_day[(date.today() - timedelta(days=days - 1 - i)).isoformat()] = 0.0
+    for s in sales:
+        if s['date'] in by_day:
+            by_day[s['date']] += s['total'] + s['tip']
+    src = {}
+    for a in appts:
+        src[a['source']] = src.get(a['source'], 0) + 1
+    top = {}
+    for a in appts:
+        if a['status'] == 'done':
+            top[a['svc_name']] = top.get(a['svc_name'], 0) + 1
+    done = [a for a in appts if a['status'] == 'done']
+    noshow = [a for a in appts if a['status'] == 'noshow']
+    clients_seen = {}
+    for a in done:
+        clients_seen[a['client_id']] = clients_seen.get(a['client_id'], 0) + 1
+    returning = sum(1 for n in clients_seen.values() if n >= 2)
+    by_staff = {}
+    for s in sales:
+        if s['staff_id']:
+            by_staff[s['staff_id']] = by_staff.get(s['staff_id'], 0) + s['total'] + s['tip']
+    staff_names = {r['id']: r['name'] for r in rows('SELECT id,name FROM staff WHERE location_id=?', (loc,))}
+    fill = []
+    for c in rows('SELECT * FROM classes WHERE location_id=?', (loc,)):
+        n = one('SELECT COUNT(*) n FROM attendance WHERE class_id=? AND date>=?', (c['id'], since))['n']
+        held = sum(1 for i in range(days) if str(dow((date.today() - timedelta(days=i)).isoformat())) in c['days'].split(','))
+        fill.append(dict(name=c['name'], rate=round(n / (c['cap'] * held) * 100) if held else 0, held=held))
+    lapsed = rows("SELECT c.id,c.name FROM clients c WHERE c.location_id=? AND c.visits>0 AND NOT EXISTS (SELECT 1 FROM appointments a WHERE a.client_id=c.id AND a.status='done' AND a.date>=?)", (loc, (date.today() - timedelta(days=45)).isoformat()))
+    active_memberships = one("SELECT COUNT(*) n FROM client_passes cp JOIN clients c ON c.id=cp.client_id JOIN passes p ON p.id=cp.pass_id WHERE c.location_id=? AND p.type='unlimited' AND cp.status='active' AND cp.expires>=?", (loc, today()))['n']
+    mrr = one("SELECT COALESCE(SUM(COALESCE(cp.price,p.price)),0) v FROM client_passes cp JOIN clients c ON c.id=cp.client_id JOIN passes p ON p.id=cp.pass_id WHERE c.location_id=? AND p.type='unlimited' AND cp.status='active' AND cp.expires>=?", (loc, today()))['v']
+    return dict(days=days, revenue=round(sum(by_day.values()), 2), revenue_by_day=[dict(date=k, value=round(v, 2)) for k, v in by_day.items()],
+                visits=len(done), noshow_rate=round(len(noshow) / len(appts) * 100) if appts else 0, avg_ticket=round(sum(s['total'] + s['tip'] for s in sales) / len(sales), 2) if sales else 0,
+                by_source=src, top_services=sorted(top.items(), key=lambda x: -x[1])[:6], returning=returning, unique_clients=len(clients_seen),
+                by_staff=sorted([(staff_names.get(k, '—'), round(v, 2)) for k, v in by_staff.items()], key=lambda x: -x[1]), class_fill=fill,
+                lapsed=[dict(id=l['id'], name=l['name']) for l in lapsed[:10]], lapsed_count=len(lapsed), active_memberships=active_memberships, mrr=round(mrr, 2),
+                by_method=sorted({m: round(sum(s['total'] + s['tip'] for s in sales if s['method'] == m), 2) for m in {s['method'] for s in sales}}.items(), key=lambda x: -x[1]))
+
+
+def h_settings(ctx):
+    """Business settings: hours, policy, brand."""
+    b = ctx['body']
+    L = one('SELECT * FROM locations WHERE id=?', (ctx['loc'],))
+    if 'open' in b or 'close' in b:
+        CON.execute('UPDATE locations SET open_time=?, close_time=? WHERE id=?', (b.get('open', L['open_time']), b.get('close', L['close_time']), L['id']))
+    if isinstance(b.get('policy'), dict):
+        pol = policy_of(L)
+        for k, v in b['policy'].items():
+            if k in pol:
+                pol[k] = bool(v) if isinstance(pol[k], bool) else float(v or 0)
+        CON.execute('UPDATE locations SET policy=? WHERE id=?', (json.dumps(pol), L['id']))
+    if 'name' in b and b['name'].strip():
+        CON.execute('UPDATE locations SET name=? WHERE id=?', (b['name'].strip()[:60], L['id']))
+    if 'city' in b:
+        CON.execute('UPDATE locations SET city=? WHERE id=?', (b['city'].strip()[:60], L['id']))
+    if 'brand' in b:
+        CON.execute('UPDATE locations SET brand=? WHERE id=?', (json.dumps(b['brand']), L['id']))
+    audit(ctx['loc'], 'settings.update', ', '.join(b.keys()))
+    return state(ctx['loc'])
+
+
+def h_audit(ctx):
+    return dict(events=[dict(ts=r['ts'], actor=r['actor'], action=r['action'], detail=r['detail']) for r in rows('SELECT * FROM audit WHERE location_id=? ORDER BY id DESC LIMIT 60', (ctx['loc'],))])
+
+
+def h_search(ctx):
+    """Command palette search: clients, services, classes, upcoming appointments."""
+    q = (ctx['query'].get('q') or '').strip().lower()
+    loc = ctx['loc']
+    if len(q) < 2:
+        return dict(results=[])
+    like = '%' + q + '%'
+    out = []
+    for c in rows('SELECT id,name,phone,email FROM clients WHERE location_id=? AND (lower(name) LIKE ? OR phone LIKE ? OR lower(email) LIKE ?) LIMIT 6', (loc, like, like, like)):
+        out.append(dict(kind='client', id=c['id'], title=c['name'], sub=c['phone'] or c['email'] or ''))
+    for v in rows('SELECT id,name,dur,price FROM services WHERE location_id=? AND lower(name) LIKE ? LIMIT 4', (loc, like)):
+        out.append(dict(kind='service', id=v['id'], title=v['name'], sub='%d min · $%.2f' % (v['dur'], v['price'])))
+    for a in rows("SELECT a.id,a.date,a.time,c.name,v.name svc FROM appointments a JOIN clients c ON c.id=a.client_id JOIN services v ON v.id=a.service_id WHERE a.location_id=? AND a.date>=? AND a.status IN ('booked','arrived') AND lower(c.name) LIKE ? ORDER BY a.date,a.time LIMIT 5", (loc, today(), like)):
+        out.append(dict(kind='appointment', id=a['id'], title='%s · %s' % (a['name'], a['svc']), sub='%s %s' % (a['date'], a['time'])))
+    return dict(results=out)
+
+
 # ---------------------------------------------------------------- routing
 ROUTES = [
     ('GET',    r'/api/locations$', h_locations),
@@ -1415,12 +1977,36 @@ ROUTES = [
     ('POST',   r'/api/locations/(?P<loc>\w+)/hl/seed$', h_hl_seed),
     ('GET',    r'/api/locations/(?P<loc>\w+)/hl/verify$', h_hl_verify),
     ('POST',   r'/api/locations/(?P<loc>\w+)/demo/seed-more$', h_seed_more),
+    ('POST',   r'/api/locations/(?P<loc>\w+)/auth/pin$', h_auth_pin),
+    ('PATCH',  r'/api/locations/(?P<loc>\w+)/clients/(?P<id>\w+)$', h_client_update),
+    ('POST',   r'/api/locations/(?P<loc>\w+)/clients/(?P<id>\w+)/card$', h_client_card),
+    ('DELETE', r'/api/locations/(?P<loc>\w+)/clients/(?P<id>\w+)/card$', h_client_card),
+    ('PATCH',  r'/api/locations/(?P<loc>\w+)/appointments/(?P<id>\w+)$', h_appt_update),
+    ('POST',   r'/api/locations/(?P<loc>\w+)/blocks$', h_block_create),
+    ('DELETE', r'/api/locations/(?P<loc>\w+)/blocks/(?P<id>\w+)$', h_block_delete),
+    ('POST',   r'/api/locations/(?P<loc>\w+)/waitlist$', h_waitlist_add),
+    ('DELETE', r'/api/locations/(?P<loc>\w+)/waitlist/(?P<id>\w+)$', h_waitlist_remove),
+    ('POST',   r'/api/locations/(?P<loc>\w+)/waitlist/(?P<id>\w+)/book$', h_waitlist_book),
+    ('POST',   r'/api/locations/(?P<loc>\w+)/client-passes/(?P<id>\w+)/freeze$', h_pass_freeze),
+    ('POST',   r'/api/locations/(?P<loc>\w+)/client-passes/(?P<id>\w+)/unfreeze$', h_pass_unfreeze),
+    ('POST',   r'/api/locations/(?P<loc>\w+)/client-passes/(?P<id>\w+)/cancel$', h_pass_cancel),
+    ('POST',   r'/api/locations/(?P<loc>\w+)/billing/run$', h_bill_now),
+    ('POST',   r'/api/locations/(?P<loc>\w+)/giftcards$', h_giftcard_create),
+    ('POST',   r'/api/locations/(?P<loc>\w+)/sales/(?P<id>\w+)/refund$', h_refund),
+    ('GET',    r'/api/locations/(?P<loc>\w+)/insights$', h_insights),
+    ('PATCH',  r'/api/locations/(?P<loc>\w+)/settings$', h_settings),
+    ('GET',    r'/api/locations/(?P<loc>\w+)/audit$', h_audit),
+    ('GET',    r'/api/locations/(?P<loc>\w+)/search$', h_search),
+    ('GET',    r'/api/public/(?P<slug>[a-z]+)/manage/(?P<token>\w+)$', h_public_manage),
+    ('POST',   r'/api/public/(?P<slug>[a-z]+)/manage/(?P<token>\w+)/cancel$', h_public_manage_cancel),
+    ('POST',   r'/api/public/(?P<slug>[a-z]+)/manage/(?P<token>\w+)/move$', h_public_manage_move),
+    ('POST',   r'/api/public/(?P<slug>[a-z]+)/kiosk$', h_public_kiosk),
     ('GET',    r'/api/public/(?P<slug>[a-z]+)$', h_public_info),
     ('GET',    r'/api/public/(?P<slug>[a-z]+)/availability$', h_public_availability),
     ('POST',   r'/api/public/(?P<slug>[a-z]+)/book$', h_public_book),
 ]
 COMPILED = [(m, re.compile(p), h) for m, p, h in ROUTES]
-MIME = {'.html': 'text/html; charset=utf-8', '.js': 'application/javascript', '.css': 'text/css', '.png': 'image/png', '.svg': 'image/svg+xml', '.ico': 'image/x-icon'}
+MIME = {'.html': 'text/html; charset=utf-8', '.js': 'application/javascript', '.mjs': 'application/javascript', '.css': 'text/css', '.png': 'image/png', '.svg': 'image/svg+xml', '.ico': 'image/x-icon', '.json': 'application/json', '.woff2': 'font/woff2', '.woff': 'font/woff', '.txt': 'text/plain', '.map': 'application/json'}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1438,8 +2024,8 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def _static(self, name):
-        path = os.path.join(STATIC, name)
+    def _static(self, name, base=None):
+        path = os.path.join(base or STATIC, name)
         if not os.path.isfile(path):
             return self._json(404, dict(error='not found'))
         with open(path, 'rb') as f:
@@ -1456,10 +2042,19 @@ class Handler(BaseHTTPRequestHandler):
         if not u.path.startswith('/api/'):
             if self.command != 'GET':
                 return self._json(405, dict(error='method not allowed'))
+            if DIST:  # production: the built React app, with SPA fallback for its routes
+                rel = u.path.lstrip('/').replace('..', '')
+                if rel and os.path.isfile(os.path.join(DIST, rel)):
+                    return self._static(rel, DIST)
+                return self._static('index.html', DIST)
             if u.path in ('/', '/index.html'):
                 return self._static('index.html')
             if u.path.startswith('/book/'):
                 return self._static('book.html')
+            if u.path.startswith('/manage/'):
+                return self._static('manage.html')
+            if u.path.startswith('/kiosk/'):
+                return self._static('kiosk.html')
             return self._static(u.path.lstrip('/').replace('..', ''))
         body = {}
         n = int(self.headers.get('Content-Length') or 0)
@@ -1472,7 +2067,7 @@ class Handler(BaseHTTPRequestHandler):
         for method, rx, fn in COMPILED:
             m = rx.match(u.path)
             if m and method == self.command:
-                ctx = dict(body=body, query=query)
+                ctx = dict(body=body, query=query, method=self.command)
                 ctx.update(m.groupdict())
                 with LOCK:
                     try:
@@ -1505,4 +2100,5 @@ if __name__ == '__main__':
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8787
     print('Appointments running on http://localhost:%d  (db: %s)' % (port, db.DB_PATH))
     threading.Timer(5, hl_expiring_passes_tick).start()
+    threading.Timer(8, bill_memberships_tick).start()
     ThreadingHTTPServer(('', port), Handler).serve_forever()

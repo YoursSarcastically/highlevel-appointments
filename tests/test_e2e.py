@@ -629,11 +629,19 @@ class T12_ProtocolAndPersistence(Base):
             self.fail('expected 400')
         except urllib.error.HTTPError as e:
             self.assertEqual(e.code, 400)
-        for path, needle in (('/', b'<title>Appointments</title>'), ('/book/blushblade', b'Powered by HighLevel')):
-            with urllib.request.urlopen(BASE + path) as r:
-                self.assertEqual(r.status, 200)
-                self.assertIn(needle, r.read())
-        self.assertEqual(call('GET', '/static/../server.py')[0], 404)
+        for path in ('/', '/book/blushblade', '/manage/blushblade/x', '/kiosk/blushblade'):
+            with urllib.request.urlopen(BASE + path) as r:  # the plain pages or the built React app, whichever is present
+                self.assertEqual(r.status, 200, path)
+                self.assertIn(b'<title>', r.read())
+        # path traversal is neutralised: either a 404 or (with a built app) the SPA shell, never the source
+        req = urllib.request.Request(BASE + '/static/../server.py')
+        try:
+            with urllib.request.urlopen(req) as r:
+                body = r.read()
+                self.assertNotIn(b'import sqlite3', body)
+                self.assertIn(b'<!doctype', body.lower())
+        except urllib.error.HTTPError as e:
+            self.assertEqual(e.code, 404)
 
     def test_zz_data_survives_restart(self):
         st = ok('POST', self.L(self.salon, '/clients'), {'name': 'Persist Pat'})['state']
