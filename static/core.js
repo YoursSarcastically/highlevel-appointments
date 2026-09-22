@@ -46,7 +46,7 @@ function bars(items,fmt=x=>x){const max=Math.max(...items.map(x=>x[1]),1);return
 
 /* ---- shell ---- */
 const PAGES={};
-const NAV=()=>[['desk','Front desk','⌘1'],['cal','Calendar','⌘2'],['cli','Clients','⌘3'],['sales','Sales','⌘4'],['cat','Catalog','⌘5'],['team','Team',''],['ins','Insights',''],['web','Website',''],['hl','HighLevel',''],['set','Settings','']];
+const NAV=()=>[['desk','Front desk','⌘1'],['cal','Calendar','⌘2'],['cli','Clients','⌘3'],['sales','Sales','⌘4'],['cat','Catalog','⌘5'],['team','Team',''],['ins','Insights',''],['web','Website',''],['hl','HighLevel Connections',''],['set','Settings','']];
 const NATIVE=['Launchpad','Dashboard','Conversations','Calendars','Contacts','Payments','Marketing','Automation','Sites'];
 const TITLES={desk:'Front desk',cal:'Calendar',cli:'Clients',sales:'Sales',cat:'Catalog',team:'Team',ins:'Insights',web:'Website & booking',hl:'HighLevel',set:'Settings'};
 function shell(){const due=S.appts.filter(a=>a.date===TODAY&&a.status==='booked'&&mins(a.time)<=nowMins()+30).length;const me=UI.me;

@@ -290,9 +290,13 @@ def seed_location(con, t, loc_id=None, onboarded=0):
             (210, 4, 0, 6, 'booked', 'online'), (240, 0, 1, 7, 'booked', 'online')]
     tips = [8, 5]
     nsales = 0
+    lanes = set()  # (staff, time) already used today: late in the day the clamp below can land two entries on one slot
     for off, svi, sti, ci, status, source in plan:
         vid, dur, price, vname = services[svi % len(services)]
         t = tstr(min(base + off, mins(close_t) - dur))
+        while (sti, t) in lanes and mins(t) - 30 >= mins(open_t):
+            t = tstr(mins(t) - 30)  # step back a slot instead of stacking two visits on one lane
+        lanes.add((sti, t))
         con.execute('INSERT INTO appointments(id,location_id,date,time,service_id,staff_id,client_id,status,source,total,tip,paid,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
                     ('a' + uid(), loc_id, today(), t, vid, staff[sti], clients[ci], status, source, price, 0, 1 if status == 'done' else 0, now_iso()))
         if status == 'done':

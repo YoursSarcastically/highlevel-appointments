@@ -21,7 +21,7 @@ from db import uid, now_iso, today, mins, tstr, now_mins
 STATIC = os.path.join(os.path.dirname(__file__), 'static')
 # A built React app (npm run build → ../dist) is served in preference to the plain static pages.
 DIST = os.environ.get('APPT_DIST', os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'dist'))
-if not os.path.isdir(DIST):
+if not os.path.isfile(os.path.join(DIST, 'index.html')):
     DIST = None
 LOCK = threading.Lock()
 CON = db.connect()
@@ -1314,6 +1314,7 @@ def h_seed_more(ctx):
         else:
             people.append(k['id'])
     # bookings over the next 7 days, two or three per working staff member per day
+    taken = set()
     for i in range(0, 7):
         d = (date.today() + timedelta(days=i)).isoformat()
         for s in staff:
@@ -1325,6 +1326,9 @@ def h_seed_more(ctx):
                 if not sl:
                     break
                 t = rnd.choice(sl)
+                if (s['id'], d, t) in taken or staff_busy(s['id'], d, t, int(v['dur']) + int(v.get('gap_min') or 0)):
+                    continue  # never double-book a lane, even when the base seed already filled it
+                taken.add((s['id'], d, t))
                 kid = rnd.choice(people)
                 src = rnd.choice(['online', 'online', 'phone', 'google', 'walkin'])
                 status = 'booked'
